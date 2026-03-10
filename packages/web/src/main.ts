@@ -2,13 +2,9 @@ import { secp256k1 } from '@noble/curves/secp256k1';
 import { sha256 } from '@noble/hashes/sha256';
 import { hkdf } from '@noble/hashes/hkdf';
 import {
-  AppConfig,
-  UserSession,
-  showConnect,
   openContractCall,
   getStacksProvider,
 } from '@stacks/connect';
-import type { UserData } from '@stacks/connect';
 import {
   principalCV,
   noneCV,
@@ -31,12 +27,7 @@ const SF_CONTRACT = 'SP3QFYVTMS0PRJT3K3GMDW9DGR33TDHENSDWVNQMR.sm-stackflow';
 const RESERVOIR   = 'SP3QFYVTMS0PRJT3K3GMDW9DGR33TDHENSDWVNQMR.sm-reservoir';
 const CHAIN_ID    = 1; // mainnet; updated from /status if available
 
-// ─────────────────────────────────────────────────────────────────────────────
-// @stacks/connect session setup
-// ─────────────────────────────────────────────────────────────────────────────
-
-const appConfig  = new AppConfig(['store_write']);
-const userSession = new UserSession({ appConfig });
+// (no session object needed — we use getStacksProvider() after wallet detection)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Utility helpers
@@ -223,39 +214,28 @@ async function connectWallet(): Promise<void> {
   btns.forEach(b => { b.disabled = true; b.textContent = 'Connecting…'; });
 
   try {
-    let userData: UserData;
-    try {
-      userData = await new Promise<UserData>((resolve, reject) => {
-        showConnect({
-          appDetails: { name: 'Stackmail', icon: window.location.origin + '/favicon.ico' },
-          redirectTo: '/',
-          onFinish: () => resolve(userSession.loadUserData()),
-          onCancel: () => reject(new Error('Connection cancelled')),
-          userSession,
-        });
-      });
-    } catch (e) {
-      const msg = typeof e === 'string' ? e : ((e as Error)?.message || JSON.stringify(e) || 'Unknown error');
-      if (msg === 'Connection cancelled') {
-        btns.forEach(b => { b.disabled = false; b.textContent = 'Connect Wallet'; });
-        return;
-      }
-      throw e;
+    // getStacksProvider() detects Leather, Xverse, or any SIP-30 browser extension
+    const provider = getStacksProvider();
+    if (!provider) {
+      (document.getElementById('wallet-error') as HTMLElement).innerHTML =
+        '<div class="alert alert-warning">No Stacks wallet detected. Install <a href="https://leather.io" target="_blank" style="color:inherit">Leather</a> or <a href="https://xverse.app" target="_blank" style="color:inherit">Xverse</a> and refresh.</div>';
+      btns.forEach(b => { b.disabled = false; b.textContent = 'Connect Wallet'; });
+      return;
     }
 
-    const provider = getStacksProvider();
-    const addrsResp = await provider!.request('stx_getAddresses');
-    const accts = (addrsResp as { result?: { addresses?: Array<{ address: string; publicKey?: string }> }; addresses?: Array<{ address: string; publicKey?: string }> })?.result?.addresses
+    const addrsResp = await provider.request('stx_getAddresses');
+    const accts: Array<{ address: string; publicKey?: string }> =
+      (addrsResp as { result?: { addresses?: Array<{ address: string; publicKey?: string }> } })?.result?.addresses
       ?? (addrsResp as { addresses?: Array<{ address: string; publicKey?: string }> })?.addresses
       ?? [];
-    const mainnetAcct = accts.find((a) => a.address?.startsWith('SP'))
-      ?? accts.find((a) => a.address?.startsWith('ST'))
+    const mainnetAcct = accts.find(a => a.address?.startsWith('SP'))
+      ?? accts.find(a => a.address?.startsWith('ST'))
       ?? accts[0];
 
-    walletAddress = (userData as UserData & { profile?: { stxAddress?: { mainnet?: string } } }).profile?.stxAddress?.mainnet ?? mainnetAcct?.address ?? null;
-    walletPubkey  = mainnetAcct?.publicKey ?? null;
+    if (!mainnetAcct?.address) throw new Error('Wallet returned no address.');
 
-    if (!walletAddress) throw new Error('Wallet returned no address.');
+    walletAddress = mainnetAcct.address;
+    walletPubkey  = mainnetAcct.publicKey ?? null;
 
     updateWalletUI();
     await onWalletConnected();
@@ -268,7 +248,6 @@ async function connectWallet(): Promise<void> {
 }
 
 function disconnectWallet(): void {
-  userSession.signUserOut('/');
   walletAddress = null;
   walletPubkey  = null;
   pipeState     = { myBalance: 0n, serverBalance: 0n, nonce: 0n };
@@ -965,37 +944,7 @@ document.getElementById('to-input')!.addEventListener('input', (e) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bootstrap — restore session if signed in, else start at no-wallet state
+// Bootstrap
 // ─────────────────────────────────────────────────────────────────────────────
 
-(async () => {
-  if (userSession.isUserSignedIn()) {
-    try {
-      const userData = userSession.loadUserData() as UserData & { profile?: { stxAddress?: { mainnet?: string } } };
-      walletAddress = userData.profile?.stxAddress?.mainnet ?? null;
-
-      // Try to get pubkey from provider if available
-      try {
-        const provider = getStacksProvider();
-        if (provider) {
-          const addrsResp = await provider.request('stx_getAddresses');
-          const accts = (addrsResp as { result?: { addresses?: Array<{ address: string; publicKey?: string }> } })?.result?.addresses
-            ?? (addrsResp as { addresses?: Array<{ address: string; publicKey?: string }> })?.addresses
-            ?? [];
-          const mainnetAcct = accts.find((a) => a.address?.startsWith('SP'))
-            ?? accts.find((a) => a.address?.startsWith('ST'))
-            ?? accts[0];
-          if (!walletAddress) walletAddress = mainnetAcct?.address ?? null;
-          walletPubkey = mainnetAcct?.publicKey ?? null;
-        }
-      } catch { /* ignore */ }
-
-      if (walletAddress) {
-        updateWalletUI();
-        await onWalletConnected();
-        return;
-      }
-    } catch { /* fall through to no-wallet */ }
-  }
-  setAppState('no-wallet');
-})();
+setAppState('no-wallet');
