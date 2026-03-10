@@ -444,7 +444,9 @@
         </div>
       </div>
 
-      <div id="pending-summary" style="margin-bottom:20px"></div>
+      <div class="alert alert-info" style="margin-bottom:20px">
+        Once open, others can send you encrypted messages and you can send messages to anyone on Stacks.
+      </div>
 
       <ul class="onboarding-steps">
         <li class="step-done">
@@ -987,37 +989,19 @@ function updateWalletUI() {
 
 async function onWalletConnected() {
   setAppState('checking');
-  document.getElementById('checking-label').textContent = 'Registering with server…';
-
-  // Register pubkey + fetch pending messages via inbox auth
-  let pendingMessages = [];
-  try {
-    const auth = await buildWalletAuthHeader('get-inbox');
-    const r    = await fetch('/inbox?limit=50', { headers: { 'x-stackmail-auth': auth } });
-    if (r.ok) {
-      const data = await r.json();
-      pendingMessages = (data.messages || []).filter(m => !m.claimed);
-    }
-  } catch { /* registration optional if server unreachable */ }
-
   document.getElementById('checking-label').textContent = 'Checking payment channel…';
 
-  // Check on-chain tap (pipe between wallet and reservoir)
+  // Check on-chain tap — no wallet signature needed at this point
   const tap = await queryOnChainTap(walletAddress);
 
   if (!tap) {
-    // Show onboarding with pending count
     document.getElementById('onboarding-addr').textContent = walletAddress;
-    updateOnboardingPendingSummary(pendingMessages);
     setAppState('no-tap');
   } else {
-    // Tap is open — update local pipe state and go to inbox
     pipeState = { myBalance: tap.userBalance, serverBalance: tap.reservoirBalance, nonce: tap.nonce };
     updateIdentityUI();
     setAppState('ready');
     showTab('inbox');
-    renderInboxMessages(pendingMessages);
-    loadInbox(); // full refresh in background
     loadStatus();
   }
 }
@@ -1247,25 +1231,6 @@ async function checkTapAfterTx() {
     btn.textContent = 'Check Again';
     statusEl.innerHTML = '<div class="alert alert-warning">Channel not found yet — the transaction may still be confirming. Try again in a moment.</div>';
   }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Onboarding: pending message summary
-// ─────────────────────────────────────────────────────────────────────────────
-
-function updateOnboardingPendingSummary(messages) {
-  const el = document.getElementById('pending-summary');
-  if (messages.length === 0) {
-    el.innerHTML = `<div class="alert alert-info">No messages yet. Open your mailbox so others can send you messages.</div>`;
-    return;
-  }
-  const totalSats = messages.reduce((s, m) => s + BigInt(m.amount || '0'), 0n);
-  el.innerHTML = `
-    <div class="alert alert-success">
-      <strong>${messages.length} message${messages.length !== 1 ? 's' : ''} waiting for you</strong> —
-      ${totalSats.toLocaleString()} sats ready to collect.
-      Open your mailbox to access them.
-    </div>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1627,6 +1592,7 @@ function updateIdentityUI() {
 function showTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
   document.querySelectorAll('#panel-main .tab-panel').forEach(p => p.classList.toggle('active', p.id === `tab-${name}`));
+  if (name === 'inbox')  loadInbox();
   if (name === 'status') loadStatus();
 }
 
