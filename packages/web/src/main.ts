@@ -25,6 +25,8 @@ import type { ClarityValue } from '@stacks/transactions';
 
 const SF_CONTRACT = 'SP3QFYVTMS0PRJT3K3GMDW9DGR33TDHENSDWVNQMR.sm-stackflow';
 const RESERVOIR   = 'SP3QFYVTMS0PRJT3K3GMDW9DGR33TDHENSDWVNQMR.sm-reservoir';
+const TOKEN       = 'SP3QFYVTMS0PRJT3K3GMDW9DGR33TDHENSDWVNQMR.sm-test-token';
+const TOKEN_NAME  = 'sm-test-token'; // asset name inside the SIP-010 contract
 const CHAIN_ID    = 1; // mainnet; updated from /status if available
 
 // (no session object needed — we use getStacksProvider() after wallet detection)
@@ -420,12 +422,13 @@ function cvTupleHex(fields: Record<string, string>): string {
 
 async function queryOnChainTap(userAddr: string): Promise<TapState | null> {
   try {
-    const pipeKey = canonicalPipeKey(null, userAddr, RESERVOIR);
-    const tokenCV = '09'; // none
+    const pipeKey = canonicalPipeKey(TOKEN, userAddr, RESERVOIR);
+    const tokenCV = cvPrincipalHex(TOKEN); // (some <TOKEN>)
+    const someByte = '0a'; // Clarity OptionalSome prefix
     const argHex  = '0x' + cvTupleHex({
       'principal-1': cvPrincipalHex(pipeKey['principal-1']),
       'principal-2': cvPrincipalHex(pipeKey['principal-2']),
-      token: tokenCV,
+      token: someByte + tokenCV,
     });
     const [contractAddr, contractName] = SF_CONTRACT.split('.');
     const r = await fetch(
@@ -476,11 +479,15 @@ async function openMailbox(): Promise<void> {
         contractAddress: RESERVOIR.split('.')[0],
         contractName:    RESERVOIR.split('.')[1],
         functionName:    'create-tap-with-borrowed-liquidity',
-        functionArgs:    [principalCV(SF_CONTRACT), noneCV()],
+        functionArgs:    [principalCV(SF_CONTRACT), someCV(principalCV(TOKEN))],
         network:         'mainnet',
-        postConditionMode: PostConditionMode.Allow,
+        postConditionMode: PostConditionMode.Deny,
         postConditions: [
+          // User sends nothing
           Pc.principal(walletAddress!).willSendEq(0n).ustx(),
+          Pc.principal(walletAddress!).willSendEq(0n).ft(TOKEN, TOKEN_NAME),
+          // Reservoir lends tokens — cover the transfer so Deny mode doesn't abort
+          Pc.principal(RESERVOIR).willSendGte(0n).ft(TOKEN, TOKEN_NAME),
         ],
         appDetails: { name: 'Stackmail', icon: window.location.origin + '/favicon.ico' },
         onFinish:  (data: { txId?: string; txid?: string; tx_id?: string }) =>
@@ -742,8 +749,8 @@ async function sendMessage(): Promise<void> {
     const newMyBalance     = pipeState.myBalance - price;
     const newNonce         = pipeState.nonce + 1n;
 
-    // Build canonical pipe key (sender ↔ server, no token = STX)
-    const pipeKey = canonicalPipeKey(null, senderAddr, serverAddr);
+    // Build canonical pipe key (sender ↔ server, sm-test-token)
+    const pipeKey = canonicalPipeKey(TOKEN, senderAddr, serverAddr);
 
     // Build SIP-018 transfer CV
     const transferCV = buildTransferCV({
