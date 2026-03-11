@@ -19,7 +19,11 @@ async function main(): Promise<void> {
   console.log('stackmail: database ready');
 
   if (!config.serverPrivateKey) {
-    console.warn('stackmail: STACKMAIL_SERVER_PRIVATE_KEY not set — payment verification disabled');
+    if (config.allowInsecurePayments) {
+      console.warn('stackmail: STACKMAIL_SERVER_PRIVATE_KEY not set — insecure payment verification enabled');
+    } else {
+      console.warn('stackmail: STACKMAIL_SERVER_PRIVATE_KEY not set — payment verification disabled');
+    }
   }
   if (!config.sfContractId) {
     console.warn('stackmail: STACKMAIL_SF_CONTRACT_ID not set — outgoing payments disabled');
@@ -35,6 +39,7 @@ async function main(): Promise<void> {
     db: reservoirDb,
     serverAddress: config.serverStxAddress,
     serverPrivateKey: config.serverPrivateKey,
+    allowInsecurePayments: config.allowInsecurePayments,
     contractId: config.sfContractId,
     chainId: config.chainId,
     minFeeSats: config.minFeeSats,

@@ -104,6 +104,8 @@ export interface Config {
   serverStxAddress: string;
   /** Hex private key used by the reservoir to sign outgoing state updates */
   serverPrivateKey: string;
+  /** Allow insecure proof acceptance when server private key is unset (dev-only). */
+  allowInsecurePayments: boolean;
   /** StackFlow contract ID this server operates (e.g. SP...stackflow-sbtc-0-6-0) */
   sfContractId: string;
   /** Stacks chain ID: 1 = mainnet, 2147483648 = testnet/devnet */
@@ -128,6 +130,7 @@ export function loadConfig(): Config {
     stackflowNodeUrl: process.env.STACKMAIL_STACKFLOW_NODE_URL ?? '',
     serverStxAddress: process.env.STACKMAIL_SERVER_STX_ADDRESS ?? '',
     serverPrivateKey: process.env.STACKMAIL_SERVER_PRIVATE_KEY ?? '',
+    allowInsecurePayments: process.env.STACKMAIL_ALLOW_INSECURE_PAYMENTS === 'true',
     sfContractId: process.env.STACKMAIL_SF_CONTRACT_ID ?? '',
     chainId,
     messagePriceSats: process.env.STACKMAIL_MESSAGE_PRICE_SATS ?? '1000',

@@ -1,5 +1,6 @@
 export { StackmailClient, StackmailError } from './client.js';
 export type {
+  ClaimProofRecord,
   ClientConfig,
   DecryptedMessage,
   EncryptedMail,
@@ -11,5 +12,6 @@ export type {
   PollResult,
   SendOptions,
 } from './types.js';
+export { verifyPendingPaymentProof } from './sip018.js';
 // Re-export crypto primitives for convenience
 export { encryptMail, decryptMail, hashSecret, verifySecretHash } from '@stackmail/crypto';

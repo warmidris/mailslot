@@ -30,6 +30,9 @@ const TOKEN_NAME  = 'sm-test-token'; // asset name inside the SIP-010 contract
 const CHAIN_ID    = 1; // mainnet; updated from /status if available
 const OPEN_TAP_AMOUNT = 1_000_000n; // 1 STX in microstacks
 const OPEN_TAP_NONCE  = 0n;
+const OPEN_BORROW_AMOUNT = 1_000_000n; // default borrowed inbound liquidity
+const OPEN_BORROW_NONCE  = 1n;
+const OPEN_BORROW_FEE_BPS = 1000n; // 10%
 
 // (no session object needed — we use getStacksProvider() after wallet detection)
 
@@ -80,7 +83,7 @@ interface BuildTransferCVParams {
   nonce: bigint;
   action: bigint;
   actor: string;
-  hashedSecret: string;
+  hashedSecret?: string | null;
   validAfter?: bigint | null;
 }
 
@@ -97,8 +100,8 @@ function buildTransferCV(params: BuildTransferCVParams): ClarityValue {
     nonce:           uintCV(params.nonce),
     action:          uintCV(params.action),
     actor:           principalCV(params.actor),
-    'hashed-secret': someCV(bufferCV(hexToBytes(params.hashedSecret))),
-    'valid-after':   noneCV(),
+    'hashed-secret': params.hashedSecret == null ? noneCV() : someCV(bufferCV(hexToBytes(params.hashedSecret))),
+    'valid-after':   params.validAfter == null ? noneCV() : someCV(uintCV(params.validAfter)),
   });
 }
 
@@ -458,7 +461,7 @@ async function queryOnChainTap(userAddr: string): Promise<TapState | null> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Open mailbox — calls sm-reservoir::create-tap
+// Open mailbox — calls sm-reservoir::create-tap-with-borrowed-liquidity
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function openMailbox(): Promise<void> {
@@ -469,21 +472,73 @@ async function openMailbox(): Promise<void> {
   errorEl.innerHTML = '';
 
   try {
+    if (!walletAddress) throw new Error('Wallet not connected');
+    const chainId = (serverStatus.chainId as number | undefined) ?? CHAIN_ID;
+    const borrowFee = ((OPEN_BORROW_AMOUNT * OPEN_BORROW_FEE_BPS) + 9999n) / 10000n;
+
+    // Borrower signs the post-borrow deposit state (action=2, hashed-secret=none).
+    const pipeKey = canonicalPipeKey(null, walletAddress, RESERVOIR);
+    const borrowStateCV = buildTransferCV({
+      pipeKey,
+      forPrincipal: walletAddress,
+      myBalance: OPEN_TAP_AMOUNT,
+      theirBalance: OPEN_BORROW_AMOUNT,
+      nonce: OPEN_BORROW_NONCE,
+      action: 2n,
+      actor: RESERVOIR,
+      hashedSecret: null,
+      validAfter: null,
+    });
+    const mySignature = await sip018SignWithWallet(SF_CONTRACT, borrowStateCV, chainId);
+
+    // Request validated params + reservoir signature from server.
+    const paramsRes = await apiFetch('/tap/borrow-params', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        borrower: walletAddress,
+        tapAmount: OPEN_TAP_AMOUNT.toString(),
+        tapNonce: OPEN_TAP_NONCE.toString(),
+        borrowAmount: OPEN_BORROW_AMOUNT.toString(),
+        borrowFee: borrowFee.toString(),
+        myBalance: OPEN_TAP_AMOUNT.toString(),
+        reservoirBalance: OPEN_BORROW_AMOUNT.toString(),
+        borrowNonce: OPEN_BORROW_NONCE.toString(),
+        mySignature,
+      }),
+    });
+    if (!paramsRes.ok) {
+      const err = await paramsRes.json().catch(() => ({})) as { error?: string; message?: string };
+      throw new Error(err.message || err.error || `Failed to prepare borrowed-liquidity params (${paramsRes.status})`);
+    }
+    const params = await paramsRes.json() as { reservoirSignature?: string; borrowFee?: string };
+    const reservoirSignature = params.reservoirSignature;
+    if (!reservoirSignature) throw new Error('Server did not return reservoir signature');
+    const finalBorrowFee = BigInt(params.borrowFee ?? borrowFee.toString());
+
     const txId = await new Promise<string>((resolve, reject) => {
       openContractCall({
         contractAddress: RESERVOIR.split('.')[0],
         contractName:    RESERVOIR.split('.')[1],
-        functionName:    'create-tap',
+        functionName:    'create-tap-with-borrowed-liquidity',
         functionArgs: [
           principalCV(SF_CONTRACT),
           noneCV(),
           uintCV(OPEN_TAP_AMOUNT),
           uintCV(OPEN_TAP_NONCE),
+          uintCV(OPEN_BORROW_AMOUNT),
+          uintCV(finalBorrowFee),
+          uintCV(OPEN_TAP_AMOUNT),
+          uintCV(OPEN_BORROW_AMOUNT),
+          bufferCV(hexToBytes(mySignature)),
+          bufferCV(hexToBytes(reservoirSignature)),
+          uintCV(OPEN_BORROW_NONCE),
         ],
         network:         'mainnet',
         postConditionMode: PostConditionMode.Deny,
         postConditions: [
-          Pc.principal(walletAddress!).willSendEq(OPEN_TAP_AMOUNT).ustx(),
+          Pc.principal(walletAddress!).willSendEq(OPEN_TAP_AMOUNT + finalBorrowFee).ustx(),
+          Pc.principal(RESERVOIR).willSendEq(OPEN_BORROW_AMOUNT).ustx(),
         ],
         appDetails: { name: 'Stackmail', icon: window.location.origin + '/favicon.ico' },
         onFinish:  (data: { txId?: string; txid?: string; tx_id?: string }) =>

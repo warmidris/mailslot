@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createECDH, randomBytes } from 'node:crypto';
 import { StackmailClient, StackmailError } from './client.js';
 import { encryptMail, hashSecret } from '@stackmail/crypto';
-import type { ClientConfig, PaymentInfo } from './types.js';
+import type { ClientConfig } from './types.js';
 
 // ─── Test keypair ─────────────────────────────────────────────────────────────
 
@@ -22,18 +22,6 @@ function makeConfig(overrides: Partial<ClientConfig> = {}): ClientConfig {
     signer: async (msg) => 'a'.repeat(128), // dummy sig — not verified in client tests
     paymentProofBuilder: async ({ hashedSecretHex }) =>
       JSON.stringify({ hashedSecret: hashedSecretHex, forPrincipal: 'SP1SENDER', amount: '1000' }),
-    ...overrides,
-  };
-}
-
-function makePaymentInfo(overrides: Partial<PaymentInfo> = {}): PaymentInfo {
-  return {
-    recipientPublicKey: recipientPubkeyHex,
-    amount: '1000',
-    fee: '100',
-    recipientAmount: '900',
-    stackflowNodeUrl: 'http://localhost:8787',
-    serverAddress: 'SP1SERVER',
     ...overrides,
   };
 }
@@ -104,6 +92,27 @@ describe('StackmailClient.send', () => {
     expect(err).toBeInstanceOf(StackmailError);
     expect(err.statusCode).toBe(500);
   });
+
+  it('passes the hashed secret (not raw secret) to paymentProofBuilder', async () => {
+    const proofBuilder = vi.fn(async ({ hashedSecret }) =>
+      JSON.stringify({ hashedSecret, forPrincipal: 'SP1SENDER', amount: '1000' }),
+    );
+    const serverStatus = {
+      ok: true, messagePriceSats: '1000', minFeeSats: '100',
+      serverAddress: 'SP1SERVER', network: 'mainnet',
+    };
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(serverStatus), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, messageId: 'msg-123' }), { status: 200 })));
+
+    const client = new StackmailClient(makeConfig({ paymentProofBuilder: proofBuilder }));
+    await client.send({ to: 'SP1BOB', recipientPublicKey: recipientPubkeyHex, body: 'Hash arg test' });
+
+    const call = proofBuilder.mock.calls[0]?.[0] as { hashedSecret: string; hashedSecretHex: string } | undefined;
+    expect(call).toBeDefined();
+    expect(call?.hashedSecret).toBe(call?.hashedSecretHex);
+    expect(call?.hashedSecret).toHaveLength(64);
+  });
 });
 
 describe('StackmailClient.claim', () => {
@@ -151,11 +160,69 @@ describe('StackmailClient.claim', () => {
     expect(result.id).toBe(msgId);
     expect(result.subject).toBe('Test');
     expect(result.body).toBe('Hello claim test');
+    expect(result.claimProof.secret).toBe(secretHex);
+    expect(result.claimProof.hashedSecret).toBe(hashedSecretHex);
+    expect(result.claimProof.proofVerified).toBeNull();
 
     // The claim call should have sent the correct secret
     const claimCall = mockFetch.mock.calls[1];
     const claimBody = JSON.parse(claimCall[1].body as string) as { secret: string };
     expect(claimBody.secret).toBe(secretHex);
+  });
+
+  it('does not reveal secret when preview hash does not match', async () => {
+    const secretHex = randomBytes(32).toString('hex');
+    const encryptedPayload = encryptMail(
+      { v: 1, secret: secretHex, body: 'preview mismatch' },
+      recipientPubkeyHex,
+    );
+    const mockFetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      encryptedPayload,
+      hashedSecret: hashSecret(randomBytes(32).toString('hex')),
+      pendingPayment: null,
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', mockFetch);
+
+    const client = new StackmailClient(makeConfig());
+    await expect(client.claim('msg-hash-mismatch')).rejects.toBeInstanceOf(StackmailError);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists claim proof via saveClaimProof hook', async () => {
+    const secretHex = randomBytes(32).toString('hex');
+    const hashedSecretHex = hashSecret(secretHex);
+    const encryptedPayload = encryptMail(
+      { v: 1, secret: secretHex, body: 'persist proof' },
+      recipientPubkeyHex,
+    );
+    const saveClaimProof = vi.fn(async () => {});
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        encryptedPayload,
+        hashedSecret: hashedSecretHex,
+        pendingPayment: null,
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        message: {
+          id: 'msg-proof',
+          from: 'SP1SENDER',
+          to: 'SP1RECIPIENT',
+          sentAt: Date.now(),
+          amount: '1000',
+          fee: '100',
+          paymentId: 'pay-proof',
+          encryptedPayload,
+        },
+        pendingPayment: null,
+      }), { status: 200 })));
+
+    const client = new StackmailClient(makeConfig({ saveClaimProof }));
+    await client.claim('msg-proof');
+    expect(saveClaimProof).toHaveBeenCalledTimes(1);
+    expect(saveClaimProof).toHaveBeenCalledWith(expect.objectContaining({
+      secret: secretHex,
+      hashedSecret: hashedSecretHex,
+    }));
   });
 
   it('throws StackmailError if server rejects the claim', async () => {

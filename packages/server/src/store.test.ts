@@ -173,4 +173,5 @@ describe('SqliteMessageStore', () => {
       await expect(store.markPaymentSettled(msg.paymentId)).resolves.toBeUndefined();
     });
   });
+
 });

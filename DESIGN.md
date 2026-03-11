@@ -85,7 +85,7 @@ Sender                          Server                        Recipient
   |                               |    { secret: R }             |
   |                               |<-----------------------------|
   |                               |  verify sha256(R)==H ✓       |
-  |                               |  settle both SF channels     |
+  |                               |  mark claim finalized        |
   |                               |  { message, pendingPayment } |
   |                               |----------------------------->|
 ```
@@ -146,7 +146,7 @@ setInterval(async () => {
 | POST | `/messages/{addr}` | x402 payment | Send encrypted message |
 | GET | `/inbox` | signed | List inbox (metadata only) |
 | GET | `/inbox/{id}/preview` | signed | Get encrypted payload + pending payment (pre-claim) |
-| POST | `/inbox/{id}/claim` | signed | Reveal R, settle payment, get message confirmed |
+| POST | `/inbox/{id}/claim` | signed | Reveal R, finalize claim, get message confirmed |
 | GET | `/inbox/{id}` | signed | Fetch a previously claimed message |
 
 ## Packages

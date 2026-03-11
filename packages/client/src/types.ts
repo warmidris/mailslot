@@ -32,6 +32,11 @@ export interface DecryptedMessage {
   paymentId: string;
   subject?: string;
   body: string;
+  /**
+   * Off-chain dispute artifact for this claim.
+   * Save this (especially secret + pendingPayment) so you can prove HTLC release later.
+   */
+  claimProof: ClaimProofRecord;
 }
 
 /** Server's payment parameters for sending to an address */
@@ -52,6 +57,18 @@ export interface PendingPayment {
   stateProof: Record<string, unknown>;
   amount: string;
   hashedSecret: string;
+}
+
+export interface ClaimProofRecord {
+  messageId: string;
+  paymentId: string;
+  recipient: string;
+  secret: string;
+  hashedSecret: string;
+  claimedAt: number;
+  pendingPayment: PendingPayment | null;
+  proofVerified: boolean | null;
+  verificationError?: string;
 }
 
 export interface SendOptions {
@@ -88,6 +105,12 @@ export interface ClientConfig {
   /** Default stackmail server base URL */
   serverUrl: string;
   /**
+   * Optional Stacks chain ID used for strict SIP-018 verification.
+   * If omitted, verification will accept signatures valid for either
+   * mainnet or testnet domains.
+   */
+  chainId?: number;
+  /**
    * Sign a message string with the agent's secp256k1 private key.
    * Must return a compact 64-byte ECDSA signature (r||s) as hex.
    */
@@ -107,4 +130,9 @@ export interface ClientConfig {
    * Keep this in memory only; never log or persist.
    */
   privateKey: string;
+  /**
+   * Optional hook to persist claim proofs (secret + pending payment + verification result)
+   * for future dispute handling.
+   */
+  saveClaimProof?: (proof: ClaimProofRecord) => Promise<void> | void;
 }

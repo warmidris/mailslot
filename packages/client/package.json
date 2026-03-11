@@ -12,6 +12,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@noble/curves": "^1.4.0",
     "@stackmail/crypto": "*"
   },
   "devDependencies": {

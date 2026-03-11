@@ -25,10 +25,23 @@ export interface IPaymentService {
     recipientAddr: string;
     contractId: string;
   }): Promise<PendingPayment | null>;
-  settlePayment(args: { paymentId: string; secret: string; hashedSecret: string }): Promise<void>;
+  createTapWithBorrowedLiquidityParams(args: {
+    borrower: string;
+    tapAmount: string;
+    tapNonce: string;
+    borrowAmount: string;
+    borrowFee: string;
+    myBalance: string;
+    reservoirBalance: string;
+    borrowNonce: string;
+    mySignature: string;
+  }): Promise<{
+    borrowFee: string;
+    reservoirSignature: string;
+  }>;
 }
 import { verifyInboxAuth, AuthError, AUTH_DOMAIN } from './auth.js';
-import { hashSecret, verifySecretHash } from '@stackmail/crypto';
+import { verifySecretHash } from '@stackmail/crypto';
 
 export function createMailServer(
   config: Config,
@@ -223,18 +236,78 @@ export function createMailServer(
       throw err;
     }
 
-    paymentService.settlePayment({
-      paymentId: stored.paymentId,
-      secret: data.secret,
-      hashedSecret: stored.hashedSecret,
-    }).then(() => store.markPaymentSettled(stored.paymentId)).catch(err => {
-      console.error('payment settlement error', stored.paymentId, err);
-    });
+    await store.markPaymentSettled(stored.paymentId);
 
     return json(res, 200, {
       message,
       pendingPayment: stored.pendingPayment,
     });
+  }
+
+  async function handleTapBorrowParams(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!sfContractId) {
+      return json(res, 503, { error: 'stackflow-contract-missing' });
+    }
+
+    let body: string;
+    try {
+      body = await readBody(req, 4096);
+    } catch {
+      return json(res, 413, { error: 'body-too-large' });
+    }
+
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      return json(res, 400, { error: 'invalid-json' });
+    }
+
+    const borrower = typeof data['borrower'] === 'string' ? data['borrower'] : '';
+    const tapAmount = String(data['tapAmount'] ?? '');
+    const tapNonce = String(data['tapNonce'] ?? '');
+    const borrowAmount = String(data['borrowAmount'] ?? '');
+    const borrowFee = String(data['borrowFee'] ?? '');
+    const myBalance = String(data['myBalance'] ?? '');
+    const reservoirBalance = String(data['reservoirBalance'] ?? '');
+    const borrowNonce = String(data['borrowNonce'] ?? '');
+    const mySignature = typeof data['mySignature'] === 'string' ? data['mySignature'] : '';
+
+    if (!borrower || !tapAmount || !tapNonce || !borrowAmount || !borrowFee || !myBalance || !reservoirBalance || !borrowNonce || !mySignature) {
+      return json(res, 400, { error: 'invalid-params', message: 'missing required borrow params' });
+    }
+
+    try {
+      const signed = await paymentService.createTapWithBorrowedLiquidityParams({
+        borrower,
+        tapAmount,
+        tapNonce,
+        borrowAmount,
+        borrowFee,
+        myBalance,
+        reservoirBalance,
+        borrowNonce,
+        mySignature,
+      });
+      return json(res, 200, {
+        ok: true,
+        stackflowContractId: sfContractId,
+        token: null,
+        tapAmount,
+        tapNonce,
+        borrowAmount,
+        borrowFee: signed.borrowFee,
+        myBalance,
+        reservoirBalance,
+        borrowNonce,
+        reservoirSignature: signed.reservoirSignature,
+      });
+    } catch (err) {
+      if (err instanceof PaymentError) {
+        return json(res, err.statusCode, { error: err.reason, message: err.message });
+      }
+      throw err;
+    }
   }
 
   // ─── Request router ─────────────────────────────────────────────────────────
@@ -319,6 +392,10 @@ export function createMailServer(
       return handleClaim(req, res, decodeURIComponent(claimMatch[1]));
     }
 
+    if (method === 'POST' && path === '/tap/borrow-params') {
+      return handleTapBorrowParams(req, res);
+    }
+
     return json(res, 404, { error: 'not-found' });
   }
 
@@ -359,12 +436,13 @@ export function createMailServer(
     }
   }
 
-  return createServer((req, res) => {
+  const server = createServer((req, res) => {
     handleRequest(req, res).catch(err => {
       console.error('unhandled error', err);
       json(res, 500, { error: 'internal-error' });
     });
   });
+  return server;
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
