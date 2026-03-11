@@ -9,7 +9,7 @@
  */
 
 import type { PendingPayment } from './types.js';
-import { cvToValue, hexToCV, principalCV, serializeCVBytes, uintCV } from '@stacks/transactions';
+import { cvToValue, hexToCV, noneCV, principalCV, serializeCVBytes, someCV, uintCV } from '@stacks/transactions';
 import type { ClarityValue } from '@stacks/transactions';
 import { buildTransferMessage, sip018Sign, sip018Verify, type TransferState } from './sip018.js';
 
@@ -326,6 +326,46 @@ export class ReservoirService {
   }
 
   /**
+   * Check the on-chain stackflow contract to see if a pipe exists between
+   * `actor` and `this.serverAddress` for the given token.
+   * Used to gate first-payment acceptance when no local DB record exists yet.
+   */
+  private async checkOnChainPipeExists(
+    actor: string,
+    pipeKey: { 'principal-1': string; 'principal-2': string; token?: string | null },
+  ): Promise<boolean> {
+    try {
+      const [contractAddr, contractName] = this.contractId.split('.');
+      if (!contractAddr || !contractName) return false;
+
+      const tokenCV = pipeKey.token != null ? someCV(principalCV(pipeKey.token)) : noneCV();
+      const withCV = principalCV(this.serverAddress);
+
+      const endpoint = `${chainIdToHiroApi(this.chainId)}/v2/contracts/call-read/${contractAddr}/${contractName}/get-pipe`;
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sender: actor,
+          arguments: [
+            '0x' + Buffer.from(serializeCVBytes(tokenCV)).toString('hex'),
+            '0x' + Buffer.from(serializeCVBytes(withCV)).toString('hex'),
+          ],
+        }),
+      });
+
+      if (!response.ok) return false;
+      const payload = await response.json() as { okay?: boolean; result?: string };
+      if (!payload.okay || typeof payload.result !== 'string') return false;
+
+      const cv = hexToCV(payload.result);
+      return cv.type === 'some';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Verify an incoming x402 payment proof.
    *
    * The proof is a JSON object (base64url-encoded) representing a StackFlow
@@ -488,8 +528,12 @@ export class ReservoirService {
 
       incomingAmount = serverNewBalance - existingServerBalance;
     } else {
-      // New pipe: derive amount from balance increase (myBalance is server's new total)
-      // We assume the initial balance came from agent's channel setup
+      // No DB record — verify a tap exists on-chain before accepting first payment.
+      const tapExists = await this.checkOnChainPipeExists(actor, pipeKey);
+      if (!tapExists) {
+        throw new ReservoirError(402, `no tap found for sender ${actor}`, 'no-tap');
+      }
+      // Tap confirmed on-chain; accept this as the first payment on this pipe.
       incomingAmount = serverNewBalance;
     }
 
