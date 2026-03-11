@@ -57,7 +57,6 @@ const testConfig: Config = {
   stackflowNodeUrl: '',
   serverStxAddress: 'SP123',
   serverPrivateKey: '',
-  allowInsecurePayments: true,
   sfContractId: '',
   chainId: 1,
   messagePriceSats: '1000',

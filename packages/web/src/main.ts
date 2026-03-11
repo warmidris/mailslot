@@ -3,6 +3,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import { hkdf } from '@noble/hashes/hkdf';
 import {
   openContractCall,
+  request as stacksRequest,
   getStacksProvider,
 } from '@stacks/connect';
 import {
@@ -11,7 +12,10 @@ import {
   someCV,
   tupleCV,
   uintCV,
+  stringAsciiCV,
   bufferCV,
+  hexToCV,
+  cvToValue,
   Pc,
   PostConditionMode,
   serializeCVBytes,
@@ -28,11 +32,10 @@ const RESERVOIR   = 'SP3QFYVTMS0PRJT3K3GMDW9DGR33TDHENSDWVNQMR.sm-reservoir';
 const TOKEN       = 'SP3QFYVTMS0PRJT3K3GMDW9DGR33TDHENSDWVNQMR.sm-test-token';
 const TOKEN_NAME  = 'sm-test-token'; // asset name inside the SIP-010 contract
 const CHAIN_ID    = 1; // mainnet; updated from /status if available
-const OPEN_TAP_AMOUNT = 1_000_000n; // 1 STX in microstacks
+const OPEN_TAP_AMOUNT = 10_000n; // outbound liquidity from the user (sats)
 const OPEN_TAP_NONCE  = 0n;
-const OPEN_BORROW_AMOUNT = 1_000_000n; // default borrowed inbound liquidity
+const OPEN_BORROW_AMOUNT = 10_000n; // inbound liquidity from the reservoir (sats)
 const OPEN_BORROW_NONCE  = 1n;
-const OPEN_BORROW_FEE_BPS = 1000n; // 10%
 
 // (no session object needed — we use getStacksProvider() after wallet detection)
 
@@ -49,6 +52,32 @@ function hexToBytes(h: string): Uint8Array {
   const out = new Uint8Array(h.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
   return out;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+function chainIdToNetworkName(chainId: number): 'mainnet' | 'testnet' {
+  return chainId === 1 ? 'mainnet' : 'testnet';
+}
+
+function chainIdToHiroApi(chainId: number): string {
+  return chainId === 1 ? 'https://api.mainnet.hiro.so' : 'https://api.testnet.hiro.so';
+}
+
+function extractSignature(resp: unknown): string | null {
+  return (resp as { result?: { signature?: string }; signature?: string })?.result?.signature
+    ?? (resp as { signature?: string })?.signature
+    ?? null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -358,35 +387,67 @@ async function buildWalletAuthHeader(action: string, messageId?: string): Promis
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function sip018SignWithWallet(contractId: string, transferCV: ClarityValue, chainId: number): Promise<string> {
-  const domain = {
-    type: 'tuple',
-    data: {
-      'chain-id': { type: 'uint',         value: String(chainId) },
-      name:       { type: 'string-ascii', value: contractId },
-      version:    { type: 'string-ascii', value: '0.6.0' },
-    },
-  };
+  const domainCV = tupleCV({
+    'chain-id': uintCV(chainId),
+    name: stringAsciiCV(contractId),
+    version: stringAsciiCV('0.6.0'),
+  });
+  const network = chainIdToNetworkName(chainId);
+  let resp: unknown = null;
+  let lastError: unknown = null;
 
-  const msgWalletJson = cvToWalletJson(transferCV);
+  // Preferred path: @stacks/connect request() normalizes wallet-specific quirks.
+  try {
+    resp = await stacksRequest('stx_signStructuredMessage', {
+      message: transferCV,
+      domain: domainCV,
+    });
+    const sig = extractSignature(resp);
+    if (sig) return sig;
+  } catch (err) {
+    lastError = err;
+  }
 
   const provider = getStacksProvider();
-  let resp: unknown;
+  if (!provider) {
+    if (lastError) throw lastError;
+    throw new Error('No Stacks wallet detected');
+  }
+
+  // Fallback path for providers that only expose raw request().
   try {
-    resp = await provider!.request('stx_signStructuredMessage', {
-      message: msgWalletJson,
-      domain,
+    resp = await provider.request('stx_signStructuredMessage', {
+      network,
+      message: transferCV,
+      domain: domainCV,
     });
-  } catch (e) {
-    const msg = (e as Error)?.message ?? '';
+    const sig = extractSignature(resp);
+    if (sig) return sig;
+  } catch (err) {
+    lastError = err;
+  }
+
+  // Last resort: wallet-json format for older provider implementations.
+  try {
+    resp = await provider.request('stx_signStructuredMessage', {
+      network,
+      message: cvToWalletJson(transferCV),
+      domain: cvToWalletJson(domainCV),
+    });
+    const sig = extractSignature(resp);
+    if (sig) return sig;
+  } catch (err) {
+    lastError = err;
+  }
+
+  if (lastError) {
+    const msg = (lastError as Error)?.message ?? '';
     if (msg.includes('not supported') || msg.includes('structured')) {
       throw new Error("Your wallet doesn't support structured data signing (SIP-018). Try Leather v6+");
     }
-    throw e;
+    throw lastError;
   }
-  const sig = (resp as { result?: { signature?: string }; signature?: string })?.result?.signature
-    ?? (resp as { signature?: string })?.signature;
-  if (!sig) throw new Error('Wallet returned no signature for payment proof');
-  return sig;
+  throw new Error('Wallet returned no signature for payment proof');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -418,6 +479,44 @@ function cvTupleHex(fields: Record<string, string>): string {
   return h;
 }
 
+async function fetchBorrowFeeFromReservoir(borrowAmount: bigint, chainId: number): Promise<bigint> {
+  const [contractAddr, contractName] = RESERVOIR.split('.');
+  const argHex = '0x' + bytesToHex(serializeCVBytes(uintCV(borrowAmount)));
+  const sender = walletAddress ?? contractAddr;
+
+  const r = await fetch(
+    `${chainIdToHiroApi(chainId)}/v2/contracts/call-read/${contractAddr}/${contractName}/get-borrow-fee`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sender, arguments: [argHex] }),
+    },
+  );
+  if (!r.ok) {
+    throw new Error(`Failed to read borrow fee from reservoir (${r.status})`);
+  }
+
+  const data = await r.json() as { okay?: boolean; result?: string };
+  if (!data.okay || typeof data.result !== 'string') {
+    throw new Error('Reservoir get-borrow-fee read-only call failed');
+  }
+
+  try {
+    if (data.result.startsWith('0x')) {
+      const cv = hexToCV(data.result);
+      const value = cvToValue(cv);
+      if (typeof value === 'bigint') return value;
+      if (typeof value === 'number' || typeof value === 'string') return BigInt(value);
+    }
+  } catch {
+    // Fall back to parsing repr-formatted responses.
+  }
+
+  const reprMatch = data.result.match(/u(\d+)/);
+  if (reprMatch) return BigInt(reprMatch[1]);
+  throw new Error('Unexpected get-borrow-fee response format');
+}
+
 async function queryOnChainTap(userAddr: string): Promise<TapState | null> {
   try {
     const pipeKey = canonicalPipeKey(TOKEN, userAddr, RESERVOIR);
@@ -429,8 +528,9 @@ async function queryOnChainTap(userAddr: string): Promise<TapState | null> {
       token: someByte + tokenCV,
     });
     const [contractAddr, contractName] = SF_CONTRACT.split('.');
+    const chainId = (serverStatus.chainId as number | undefined) ?? CHAIN_ID;
     const r = await fetch(
-      `https://api.mainnet.hiro.so/v2/contracts/call-read/${contractAddr}/${contractName}/get-pipe`,
+      `${chainIdToHiroApi(chainId)}/v2/contracts/call-read/${contractAddr}/${contractName}/get-pipe`,
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -474,9 +574,19 @@ async function openMailbox(): Promise<void> {
   try {
     if (!walletAddress) throw new Error('Wallet not connected');
     const chainId = (serverStatus.chainId as number | undefined) ?? CHAIN_ID;
-    const borrowFee = ((OPEN_BORROW_AMOUNT * OPEN_BORROW_FEE_BPS) + 9999n) / 10000n;
+    const setProgress = (msg: string): void => {
+      errorEl.innerHTML = `<div class="alert alert-warning">${escHtml(msg)}</div>`;
+    };
+
+    setProgress('Reading borrow fee from reservoir contract…');
+    const borrowFee = await withTimeout(
+      fetchBorrowFeeFromReservoir(OPEN_BORROW_AMOUNT, chainId),
+      20_000,
+      'Timed out while reading borrow fee from reservoir contract',
+    );
 
     // Borrower signs the post-borrow deposit state (action=2, hashed-secret=none).
+    setProgress('Waiting for wallet signature (borrow params)… check your wallet popup/extension.');
     const pipeKey = canonicalPipeKey(null, walletAddress, RESERVOIR);
     const borrowStateCV = buildTransferCV({
       pipeKey,
@@ -489,24 +599,33 @@ async function openMailbox(): Promise<void> {
       hashedSecret: null,
       validAfter: null,
     });
-    const mySignature = await sip018SignWithWallet(SF_CONTRACT, borrowStateCV, chainId);
+    const mySignature = await withTimeout(
+      sip018SignWithWallet(SF_CONTRACT, borrowStateCV, chainId),
+      120_000,
+      'Timed out waiting for wallet signature. Open your wallet extension and approve the SIP-018 request.',
+    );
 
     // Request validated params + reservoir signature from server.
-    const paramsRes = await apiFetch('/tap/borrow-params', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        borrower: walletAddress,
-        tapAmount: OPEN_TAP_AMOUNT.toString(),
-        tapNonce: OPEN_TAP_NONCE.toString(),
-        borrowAmount: OPEN_BORROW_AMOUNT.toString(),
-        borrowFee: borrowFee.toString(),
-        myBalance: OPEN_TAP_AMOUNT.toString(),
-        reservoirBalance: OPEN_BORROW_AMOUNT.toString(),
-        borrowNonce: OPEN_BORROW_NONCE.toString(),
-        mySignature,
+    setProgress('Preparing borrow parameters with server…');
+    const paramsRes = await withTimeout(
+      apiFetch('/tap/borrow-params', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          borrower: walletAddress,
+          tapAmount: OPEN_TAP_AMOUNT.toString(),
+          tapNonce: OPEN_TAP_NONCE.toString(),
+          borrowAmount: OPEN_BORROW_AMOUNT.toString(),
+          borrowFee: borrowFee.toString(),
+          myBalance: OPEN_TAP_AMOUNT.toString(),
+          reservoirBalance: OPEN_BORROW_AMOUNT.toString(),
+          borrowNonce: OPEN_BORROW_NONCE.toString(),
+          mySignature,
+        }),
       }),
-    });
+      25_000,
+      'Timed out while preparing borrow parameters',
+    );
     if (!paramsRes.ok) {
       const err = await paramsRes.json().catch(() => ({})) as { error?: string; message?: string };
       throw new Error(err.message || err.error || `Failed to prepare borrowed-liquidity params (${paramsRes.status})`);
@@ -516,40 +635,46 @@ async function openMailbox(): Promise<void> {
     if (!reservoirSignature) throw new Error('Server did not return reservoir signature');
     const finalBorrowFee = BigInt(params.borrowFee ?? borrowFee.toString());
 
-    const txId = await new Promise<string>((resolve, reject) => {
-      openContractCall({
-        contractAddress: RESERVOIR.split('.')[0],
-        contractName:    RESERVOIR.split('.')[1],
-        functionName:    'create-tap-with-borrowed-liquidity',
-        functionArgs: [
-          principalCV(SF_CONTRACT),
-          noneCV(),
-          uintCV(OPEN_TAP_AMOUNT),
-          uintCV(OPEN_TAP_NONCE),
-          uintCV(OPEN_BORROW_AMOUNT),
-          uintCV(finalBorrowFee),
-          uintCV(OPEN_TAP_AMOUNT),
-          uintCV(OPEN_BORROW_AMOUNT),
-          bufferCV(hexToBytes(mySignature)),
-          bufferCV(hexToBytes(reservoirSignature)),
-          uintCV(OPEN_BORROW_NONCE),
-        ],
-        network:         'mainnet',
-        postConditionMode: PostConditionMode.Deny,
-        postConditions: [
-          Pc.principal(walletAddress!).willSendEq(OPEN_TAP_AMOUNT + finalBorrowFee).ustx(),
-          Pc.principal(RESERVOIR).willSendEq(OPEN_BORROW_AMOUNT).ustx(),
-        ],
-        appDetails: { name: 'Stackmail', icon: window.location.origin + '/favicon.ico' },
-        onFinish:  (data: { txId?: string; txid?: string; tx_id?: string }) =>
-          resolve(data.txId ?? data.txid ?? data.tx_id ?? ''),
-        onCancel:  () => reject(new Error('Transaction cancelled')),
-      });
-    });
+    setProgress('Waiting for wallet transaction confirmation…');
+    const txId = await withTimeout(
+      new Promise<string>((resolve, reject) => {
+        openContractCall({
+          contractAddress: RESERVOIR.split('.')[0],
+          contractName:    RESERVOIR.split('.')[1],
+          functionName:    'create-tap-with-borrowed-liquidity',
+          functionArgs: [
+            principalCV(SF_CONTRACT),
+            noneCV(),
+            uintCV(OPEN_TAP_AMOUNT),
+            uintCV(OPEN_TAP_NONCE),
+            uintCV(OPEN_BORROW_AMOUNT),
+            uintCV(finalBorrowFee),
+            uintCV(OPEN_TAP_AMOUNT),
+            uintCV(OPEN_BORROW_AMOUNT),
+            bufferCV(hexToBytes(mySignature)),
+            bufferCV(hexToBytes(reservoirSignature)),
+            uintCV(OPEN_BORROW_NONCE),
+          ],
+          network:         chainIdToNetworkName(chainId),
+          postConditionMode: PostConditionMode.Deny,
+          postConditions: [
+            Pc.principal(walletAddress!).willSendEq(OPEN_TAP_AMOUNT + finalBorrowFee).ustx(),
+            Pc.principal(RESERVOIR).willSendEq(OPEN_BORROW_AMOUNT).ustx(),
+          ],
+          appDetails: { name: 'Stackmail', icon: window.location.origin + '/favicon.ico' },
+          onFinish:  (data: { txId?: string; txid?: string; tx_id?: string }) =>
+            resolve(data.txId ?? data.txid ?? data.tx_id ?? ''),
+          onCancel:  () => reject(new Error('Transaction cancelled')),
+        });
+      }),
+      180_000,
+      'Timed out waiting for wallet transaction approval',
+    );
 
     if (!txId) throw new Error('No transaction ID returned from wallet');
 
-    (document.getElementById('tx-explorer-link') as HTMLAnchorElement).href        = `https://explorer.hiro.so/txid/${txId}?chain=mainnet`;
+    const chain = chainId === 1 ? 'mainnet' : 'testnet';
+    (document.getElementById('tx-explorer-link') as HTMLAnchorElement).href        = `https://explorer.hiro.so/txid/${txId}?chain=${chain}`;
     (document.getElementById('tx-explorer-link') as HTMLElement).textContent = txId.slice(0, 12) + '…' + txId.slice(-8);
     (document.getElementById('tx-status-msg') as HTMLElement).innerHTML = '';
     setAppState('tx-pending');
@@ -588,7 +713,15 @@ async function checkTapAfterTx(): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
-  return fetch(window.location.origin + path, opts);
+  const timeoutMs = 20_000;
+  if (opts.signal) return fetch(window.location.origin + path, opts);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(window.location.origin + path, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -923,6 +1056,66 @@ function updateIdentityUI(): void {
   }
 }
 
+async function setBorrowRate(): Promise<void> {
+  const input = document.getElementById('admin-borrow-rate-input') as HTMLInputElement;
+  const btn = document.getElementById('admin-set-rate-btn') as HTMLButtonElement;
+  const statusEl = document.getElementById('admin-rate-status') as HTMLElement;
+
+  if (!walletAddress) {
+    statusEl.innerHTML = '<div class="alert alert-warning">Connect wallet first.</div>';
+    return;
+  }
+
+  const raw = input.value.trim();
+  if (!/^\d+$/.test(raw)) {
+    statusEl.innerHTML = '<div class="alert alert-warning">Enter a non-negative integer borrow rate in basis points.</div>';
+    return;
+  }
+  const rate = BigInt(raw);
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Submitting…';
+  statusEl.innerHTML = '';
+
+  try {
+    const chainId = (serverStatus.chainId as number | undefined) ?? CHAIN_ID;
+    const txId = await withTimeout(
+      new Promise<string>((resolve, reject) => {
+        openContractCall({
+          contractAddress: RESERVOIR.split('.')[0],
+          contractName: RESERVOIR.split('.')[1],
+          functionName: 'set-borrow-rate',
+          functionArgs: [uintCV(rate)],
+          network: chainIdToNetworkName(chainId),
+          postConditionMode: PostConditionMode.Allow,
+          appDetails: { name: 'Stackmail', icon: window.location.origin + '/favicon.ico' },
+          onFinish: (data: { txId?: string; txid?: string; tx_id?: string }) =>
+            resolve(data.txId ?? data.txid ?? data.tx_id ?? ''),
+          onCancel: () => reject(new Error('Transaction cancelled')),
+        });
+      }),
+      180_000,
+      'Timed out waiting for wallet transaction approval',
+    );
+
+    if (!txId) throw new Error('No transaction ID returned from wallet');
+    const chain = chainId === 1 ? 'mainnet' : 'testnet';
+    statusEl.innerHTML = `
+      <div class="alert alert-success">
+        Borrow rate update submitted.<br>
+        <a href="https://explorer.hiro.so/txid/${txId}?chain=${chain}" target="_blank" rel="noopener" class="mono" style="color:inherit">
+          ${escHtml(txId)}
+        </a>
+      </div>`;
+  } catch (e) {
+    const msg = typeof e === 'string' ? e : ((e as Error)?.message || (e as { reason?: string })?.reason || JSON.stringify(e) || 'Unknown error');
+    statusEl.innerHTML = `<div class="alert alert-error">${escHtml(msg)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Set Borrow Rate';
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tab switching
 // ─────────────────────────────────────────────────────────────────────────────
@@ -972,6 +1165,7 @@ document.querySelectorAll<HTMLButtonElement>('.tab-btn').forEach(btn => {
 document.getElementById('refresh-inbox-btn')!.addEventListener('click', loadInbox);
 document.getElementById('show-claimed-cb')!.addEventListener('change', loadInbox);
 document.getElementById('send-btn')!.addEventListener('click', sendMessage);
+document.getElementById('admin-set-rate-btn')!.addEventListener('click', setBorrowRate);
 
 document.getElementById('copy-inbox-addr-btn')!.addEventListener('click', () => {
   copyToClipboard(walletAddress || '');

@@ -609,6 +609,18 @@
         <hr class="divider">
         <div class="card-title">Channel Status</div>
         <div id="status-tap-info" style="font-size:13px;color:var(--muted)">Loading…</div>
+
+        <hr class="divider">
+        <div class="card-title">Reservoir Admin</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
+          Contract authorization is enforced on-chain by `set-borrow-rate`.
+        </div>
+        <div class="form-group" style="margin-bottom:10px">
+          <label for="admin-borrow-rate-input">Borrow Rate (basis points)</label>
+          <input type="text" id="admin-borrow-rate-input" placeholder="e.g. 100" spellcheck="false" autocomplete="off" />
+        </div>
+        <button class="btn btn-secondary" id="admin-set-rate-btn">Set Borrow Rate</button>
+        <div id="admin-rate-status" style="margin-top:10px"></div>
       </div>
     </div>
 

@@ -89,7 +89,6 @@ export class ReservoirService {
   private db: DB | null = null;
   private readonly serverAddress: string;
   private readonly serverPrivateKey: string;
-  private readonly allowInsecurePayments: boolean;
   private readonly contractId: string;
   private readonly chainId: number;
   private readonly minFeeSats: bigint;
@@ -99,7 +98,6 @@ export class ReservoirService {
     db: DB;
     serverAddress: string;
     serverPrivateKey: string;
-    allowInsecurePayments?: boolean;
     contractId: string;
     chainId: number;
     minFeeSats: string;
@@ -108,7 +106,6 @@ export class ReservoirService {
     this.db = config.db;
     this.serverAddress = config.serverAddress;
     this.serverPrivateKey = config.serverPrivateKey;
-    this.allowInsecurePayments = config.allowInsecurePayments === true;
     this.contractId = config.contractId;
     this.chainId = config.chainId;
     this.minFeeSats = BigInt(config.minFeeSats);
@@ -256,30 +253,12 @@ export class ReservoirService {
       throw new ReservoirError(400, 'invalid payment header encoding', 'invalid-proof-encoding');
     }
 
-    // Dev/bypass mode: when no server key is configured, accept a simple proof
-    // format { hashedSecret, forPrincipal|actor, amount } without SIP-018 verification.
     if (!this.serverPrivateKey) {
-      if (!this.allowInsecurePayments) {
-        throw new ReservoirError(
-          503,
-          'server payment verification key unavailable',
-          'payment-verification-disabled',
-        );
-      }
-      const rawHashedSecret = typeof proof['hashedSecret'] === 'string' ? proof['hashedSecret'] : null;
-      const hashedSecret = rawHashedSecret ? normalizeHex32(rawHashedSecret) : null;
-      if (!hashedSecret) {
-        throw new ReservoirError(400, 'payment proof missing hashedSecret', 'missing-hashed-secret');
-      }
-      const senderAddress = (
-        typeof proof['forPrincipal'] === 'string' ? proof['forPrincipal'] :
-        typeof proof['actor'] === 'string' ? proof['actor'] : 'unknown'
+      throw new ReservoirError(
+        503,
+        'server payment verification key unavailable',
+        'payment-verification-disabled',
       );
-      const incomingAmount = (
-        typeof proof['amount'] === 'string' ? proof['amount'] :
-        this.messagePriceSats.toString()
-      );
-      return { hashedSecret, incomingAmount, senderAddress };
     }
 
     // Extract required fields

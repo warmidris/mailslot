@@ -41,7 +41,7 @@ function pipeId(contractId: string, p1: string, p2: string): string {
 }
 
 describe('ReservoirService', () => {
-  it('rejects payment verification when key is missing and insecure mode is disabled', async () => {
+  it('rejects payment verification when key is missing', async () => {
     const { default: Database } = await import('better-sqlite3');
     const db = new Database(':memory:');
     const serverPriv = privKeyHex();
@@ -50,7 +50,6 @@ describe('ReservoirService', () => {
       db,
       serverAddress,
       serverPrivateKey: '',
-      allowInsecurePayments: false,
       contractId: `${serverAddress}.stackflow-test`,
       chainId: 1,
       minFeeSats: '100',

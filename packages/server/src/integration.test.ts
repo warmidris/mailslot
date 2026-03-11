@@ -107,7 +107,6 @@ const serverConfig: Config = {
   stackflowNodeUrl: '',
   serverStxAddress: 'SP_SERVER',
   serverPrivateKey: '',
-  allowInsecurePayments: true,
   sfContractId: 'SP3QFYVTMS0PRJT3K3GMDW9DGR33TDHENSDWVNQMR.sm-stackflow',
   chainId: 1,
   messagePriceSats: '1000',
