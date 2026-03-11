@@ -6,11 +6,13 @@ import { secp256k1 } from '@noble/curves/secp256k1';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
+import { createHash } from 'node:crypto';
+
 import { loadConfig, type Config } from './types.js';
 import { SqliteMessageStore } from './store.js';
 import { ReservoirService } from './reservoir.js';
 import { createMailServer } from './app.js';
-import { pubkeyToStxAddress } from './auth.js';
+import { pubkeyToStxAddress, hash160ToStxAddress } from './auth.js';
 
 type ServerIdentitySource = 'env' | 'db' | 'generated';
 
@@ -44,6 +46,44 @@ function normalizeContractPrincipal(value: string): string | null {
     throw new Error('STACKMAIL_RESERVOIR_CONTRACT_ID must be a valid contract principal');
   }
   return normalized;
+}
+
+/**
+ * Fetch the `stackflow-contract` data var from the reservoir contract on-chain.
+ * Returns the contract principal string (e.g. "SP...sm-stackflow") or null.
+ */
+async function fetchSfContractFromReservoir(
+  reservoirContractId: string,
+  chainId: number,
+): Promise<string | null> {
+  const [addr, name] = reservoirContractId.split('.');
+  if (!addr || !name) return null;
+
+  const api = chainId === 1
+    ? 'https://api.mainnet.hiro.so'
+    : 'https://api.testnet.hiro.so';
+  const url = `${api}/v2/data_var/${addr}/${name}/stackflow-contract`;
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const json = await res.json() as { data?: string };
+    const hex = json.data;
+    if (!hex || !hex.startsWith('0x')) return null;
+
+    const buf = Buffer.from(hex.slice(2), 'hex');
+    // Expected: 0a (some) 06 (contract principal) version(1) hash160(20) nameLen(1) name(N)
+    if (buf[0] !== 0x0a || buf[1] !== 0x06) return null;
+    const version = buf[2];
+    const hash160 = buf.subarray(3, 23).toString('hex');
+    const nameLen = buf[23];
+    const contractName = buf.subarray(24, 24 + nameLen).toString('ascii');
+
+    const stxAddr = hash160ToStxAddress(hash160, version);
+    return `${stxAddr}.${contractName}`;
+  } catch {
+    return null;
+  }
 }
 
 function deriveStxAddressFromPrivateKey(privateKeyHex: string, chainId: number): string {
@@ -174,8 +214,15 @@ async function main(): Promise<void> {
   }
   console.log(`stackmail: signer address=${config.serverStxAddress}`);
 
+  if (!config.sfContractId && config.reservoirContractId) {
+    const discovered = await fetchSfContractFromReservoir(config.reservoirContractId, config.chainId);
+    if (discovered) {
+      config.sfContractId = discovered;
+      console.log(`stackmail: discovered SF contract from reservoir: ${discovered}`);
+    }
+  }
   if (!config.sfContractId) {
-    console.warn('stackmail: STACKMAIL_SF_CONTRACT_ID not set — outgoing payments disabled');
+    console.warn('stackmail: STACKMAIL_SF_CONTRACT_ID not set and could not be discovered — outgoing payments disabled');
   }
   if (!config.reservoirContractId) {
     console.warn('stackmail: reservoir contract not configured — tap onboarding disabled');

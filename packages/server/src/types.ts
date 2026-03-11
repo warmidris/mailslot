@@ -121,7 +121,7 @@ export function loadConfig(): Config {
   const network = (process.env.STACKMAIL_STACKS_NETWORK ?? 'mainnet').toLowerCase();
   const chainId = network === 'mainnet' ? 1 : 2147483648;
   return {
-    host: process.env.STACKMAIL_HOST ?? '127.0.0.1',
+    host: process.env.STACKMAIL_HOST ?? '0.0.0.0',
     port: parseInt(process.env.STACKMAIL_PORT ?? '8800', 10),
     dbBackend: (process.env.STACKMAIL_DB_BACKEND ?? 'sqlite') as 'sqlite' | 'postgres',
     dbFile: process.env.STACKMAIL_DB_FILE ?? './data/stackmail.db',

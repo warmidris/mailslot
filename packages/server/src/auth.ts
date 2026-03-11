@@ -74,6 +74,14 @@ export function pubkeyToStxAddress(pubkeyHex: string, testnet = false): string {
   return c32checkEncode(version, hash160);
 }
 
+/**
+ * Encode a raw hash160 + version byte into an STX c32check address.
+ * Used to decode on-chain Clarity principal values.
+ */
+export function hash160ToStxAddress(hash160Hex: string, version: number): string {
+  return c32checkEncode(version, Buffer.from(hash160Hex, 'hex'));
+}
+
 // Minimal c32check encoder (no external deps)
 const C32_CHARS = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 

@@ -467,12 +467,16 @@ async function onWalletConnected(): Promise<void> {
   (document.getElementById('checking-label') as HTMLElement).textContent = 'Checking payment channel…';
 
   try {
-    await ensureServerStatusLoaded();
+    await withTimeout(ensureServerStatusLoaded(), 15_000, 'Server status timeout');
   } catch {
     // Continue with defaults if status is temporarily unavailable.
   }
 
-  const tap = await queryOnChainTap(walletAddress!);
+  const tap = await withTimeout(
+    queryOnChainTap(walletAddress!),
+    20_000,
+    'On-chain tap query timeout',
+  ).catch(() => null);
 
   if (!tap) {
     (document.getElementById('onboarding-addr') as HTMLElement).textContent = walletAddress!;
