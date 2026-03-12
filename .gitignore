@@ -2,6 +2,8 @@ node_modules/
 dist/
 data/
 *.db
+__pycache__/
+*.pyc
 .env
 .env.*
 !.env.example

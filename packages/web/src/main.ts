@@ -157,6 +157,46 @@ function updateAdminSectionVisibility(): void {
   section.style.display = connectedUserIsReservoirAdmin() ? '' : 'none';
 }
 
+function extractRuntimeSettings(status: Record<string, unknown>): RuntimeSettingsPayload | null {
+  const raw = status.runtimeSettings;
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  if (
+    value.messagePriceSats == null ||
+    value.minFeeSats == null ||
+    value.maxPendingPerSender == null ||
+    value.maxPendingPerRecipient == null ||
+    value.maxDeferredPerSender == null ||
+    value.maxDeferredPerRecipient == null ||
+    value.maxDeferredGlobal == null ||
+    value.deferredMessageTtlMs == null
+  ) {
+    return null;
+  }
+  return {
+    messagePriceSats: String(value.messagePriceSats),
+    minFeeSats: String(value.minFeeSats),
+    maxPendingPerSender: Number(value.maxPendingPerSender),
+    maxPendingPerRecipient: Number(value.maxPendingPerRecipient),
+    maxDeferredPerSender: Number(value.maxDeferredPerSender),
+    maxDeferredPerRecipient: Number(value.maxDeferredPerRecipient),
+    maxDeferredGlobal: Number(value.maxDeferredGlobal),
+    deferredMessageTtlMs: Number(value.deferredMessageTtlMs),
+  };
+}
+
+function populateAdminSettingsForm(settings: RuntimeSettingsPayload | null): void {
+  if (!settings) return;
+  (document.getElementById('admin-message-price-input') as HTMLInputElement | null)!.value = settings.messagePriceSats;
+  (document.getElementById('admin-min-fee-input') as HTMLInputElement | null)!.value = settings.minFeeSats;
+  (document.getElementById('admin-max-pending-sender-input') as HTMLInputElement | null)!.value = String(settings.maxPendingPerSender);
+  (document.getElementById('admin-max-pending-recipient-input') as HTMLInputElement | null)!.value = String(settings.maxPendingPerRecipient);
+  (document.getElementById('admin-max-deferred-sender-input') as HTMLInputElement | null)!.value = String(settings.maxDeferredPerSender);
+  (document.getElementById('admin-max-deferred-recipient-input') as HTMLInputElement | null)!.value = String(settings.maxDeferredPerRecipient);
+  (document.getElementById('admin-max-deferred-global-input') as HTMLInputElement | null)!.value = String(settings.maxDeferredGlobal);
+  (document.getElementById('admin-deferred-ttl-input') as HTMLInputElement | null)!.value = String(settings.deferredMessageTtlMs);
+}
+
 function hasSupportedTokenResolved(): boolean {
   return Object.prototype.hasOwnProperty.call(serverStatus, 'supportedToken');
 }
@@ -481,6 +521,17 @@ let cachedGetInboxAuth: string | null = null;
 let cachedGetInboxAuthExpiry = 0;
 let inboxSessionToken: string | null = null;
 let inboxSessionExpiresAt = 0;
+
+interface RuntimeSettingsPayload {
+  messagePriceSats: string;
+  minFeeSats: string;
+  maxPendingPerSender: number;
+  maxPendingPerRecipient: number;
+  maxDeferredPerSender: number;
+  maxDeferredPerRecipient: number;
+  maxDeferredGlobal: number;
+  deferredMessageTtlMs: number;
+}
 const DECRYPT_KEY_STORAGE_KEY = 'stackmail.inboxDecryptPrivateKey';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -928,6 +979,11 @@ interface TapState {
   pipeKey: PipeKey;
 }
 
+interface PendingLeg {
+  amount: bigint;
+  burnHeight: bigint | null;
+}
+
 interface TrackedTapResponse {
   ok?: boolean;
   tap?: {
@@ -969,16 +1025,20 @@ function parseUintCv(value: ClarityValue | undefined): bigint | null {
   return null;
 }
 
-function parsePendingAmountCv(value: ClarityValue | undefined): bigint {
-  if (!value) return 0n;
-  if (value.type === ClarityType.OptionalNone) return 0n;
-  if (value.type !== ClarityType.OptionalSome) return 0n;
+function parsePendingLegCv(value: ClarityValue | undefined): PendingLeg {
+  if (!value) return { amount: 0n, burnHeight: null };
+  if (value.type === ClarityType.OptionalNone) return { amount: 0n, burnHeight: null };
+  if (value.type !== ClarityType.OptionalSome) return { amount: 0n, burnHeight: null };
   const inner = value.value;
-  if (inner.type !== ClarityType.Tuple) return 0n;
-  return parseUintCv((inner.value as Record<string, ClarityValue>).amount) ?? 0n;
+  if (inner.type !== ClarityType.Tuple) return { amount: 0n, burnHeight: null };
+  const tuple = inner.value as Record<string, ClarityValue>;
+  return {
+    amount: parseUintCv(tuple.amount) ?? 0n,
+    burnHeight: parseUintCv(tuple['burn-height']),
+  };
 }
 
-function parsePipeResult(result: string): { balance1: bigint; balance2: bigint; pending1: bigint; pending2: bigint; nonce: bigint } | null {
+function parsePipeResult(result: string): { balance1: bigint; balance2: bigint; pending1: bigint; pending2: bigint; pendingLeg1: PendingLeg; pendingLeg2: PendingLeg; nonce: bigint } | null {
   if (!result) return null;
   if (result === '0x09') return null; // (none)
 
@@ -992,11 +1052,11 @@ function parsePipeResult(result: string): { balance1: bigint; balance2: bigint; 
       const tuple = cv.value as Record<string, ClarityValue>;
       const balance1 = parseUintCv(tuple['balance-1']);
       const balance2 = parseUintCv(tuple['balance-2']);
-      const pending1 = parsePendingAmountCv(tuple['pending-1']);
-      const pending2 = parsePendingAmountCv(tuple['pending-2']);
+      const pendingLeg1 = parsePendingLegCv(tuple['pending-1']);
+      const pendingLeg2 = parsePendingLegCv(tuple['pending-2']);
       const nonce = parseUintCv(tuple.nonce);
       if (balance1 == null || balance2 == null || nonce == null) return null;
-      return { balance1, balance2, pending1, pending2, nonce };
+      return { balance1, balance2, pending1: pendingLeg1.amount, pending2: pendingLeg2.amount, pendingLeg1, pendingLeg2, nonce };
     } catch {
       return null;
     }
@@ -1014,8 +1074,25 @@ function parsePipeResult(result: string): { balance1: bigint; balance2: bigint; 
     balance2: BigInt(b2m[1]),
     pending1: p1m ? BigInt(p1m[1]) : 0n,
     pending2: p2m ? BigInt(p2m[1]) : 0n,
+    pendingLeg1: { amount: p1m ? BigInt(p1m[1]) : 0n, burnHeight: null },
+    pendingLeg2: { amount: p2m ? BigInt(p2m[1]) : 0n, burnHeight: null },
     nonce: BigInt(ncm[1]),
   };
+}
+
+async function fetchCurrentBurnBlockHeight(chainId: number): Promise<bigint | null> {
+  try {
+    const response = await fetch(`${chainIdToHiroApi(chainId)}/v2/info`);
+    if (!response.ok) return null;
+    const payload = await response.json() as Record<string, unknown>;
+    const raw = payload.burn_block_height ?? payload.burnBlockHeight;
+    if (typeof raw === 'number' || typeof raw === 'string' || typeof raw === 'bigint') {
+      return BigInt(raw);
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 async function queryOnChainTap(userAddr: string): Promise<TapState | null> {
@@ -1053,15 +1130,25 @@ async function queryOnChainTap(userAddr: string): Promise<TapState | null> {
 
     const parsed = parsePipeResult(data.result);
     if (!parsed) return null;
+    const currentBurnHeight = await fetchCurrentBurnBlockHeight(chainId);
+    const matureAmount = (leg: PendingLeg): { settledAdd: bigint; pending: bigint } => {
+      if (leg.amount <= 0n) return { settledAdd: 0n, pending: 0n };
+      if (currentBurnHeight != null && leg.burnHeight != null && currentBurnHeight >= leg.burnHeight) {
+        return { settledAdd: leg.amount, pending: 0n };
+      }
+      return { settledAdd: 0n, pending: leg.amount };
+    };
 
     const userIsP1 = pipeKey['principal-1'] === userAddr;
+    const userPending = matureAmount(userIsP1 ? parsed.pendingLeg1 : parsed.pendingLeg2);
+    const reservoirPending = matureAmount(userIsP1 ? parsed.pendingLeg2 : parsed.pendingLeg1);
     return {
       userBalance:      userIsP1 ? parsed.balance1 + parsed.pending1 : parsed.balance2 + parsed.pending2,
       reservoirBalance: userIsP1 ? parsed.balance2 + parsed.pending2 : parsed.balance1 + parsed.pending1,
-      settledUserBalance: userIsP1 ? parsed.balance1 : parsed.balance2,
-      settledReservoirBalance: userIsP1 ? parsed.balance2 : parsed.balance1,
-      pendingUserBalance: userIsP1 ? parsed.pending1 : parsed.pending2,
-      pendingReservoirBalance: userIsP1 ? parsed.pending2 : parsed.pending1,
+      settledUserBalance: (userIsP1 ? parsed.balance1 : parsed.balance2) + userPending.settledAdd,
+      settledReservoirBalance: (userIsP1 ? parsed.balance2 : parsed.balance1) + reservoirPending.settledAdd,
+      pendingUserBalance: userPending.pending,
+      pendingReservoirBalance: reservoirPending.pending,
       nonce: parsed.nonce,
       pipeKey,
     };
@@ -1097,6 +1184,20 @@ async function queryTrackedTapState(userAddr: string): Promise<TapState | null> 
 
 async function resolveTapState(userAddr: string): Promise<TapState | null> {
   return await queryTrackedTapState(userAddr) ?? await queryOnChainTap(userAddr);
+}
+
+async function refreshCurrentTapState(): Promise<void> {
+  if (!walletAddress) return;
+  const tap = await resolveTapState(walletAddress);
+  if (!tap) return;
+  pipeState = { myBalance: tap.userBalance, serverBalance: tap.reservoirBalance, nonce: tap.nonce };
+  pipeBalanceBreakdown = {
+    settledMyBalance: tap.settledUserBalance,
+    settledServerBalance: tap.settledReservoirBalance,
+    pendingMyBalance: tap.pendingUserBalance,
+    pendingServerBalance: tap.pendingReservoirBalance,
+  };
+  updateIdentityUI();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1566,6 +1667,7 @@ async function claimAndOpenMessage(messageId: string): Promise<void> {
 
     openedInboxMessages[messageId] = decrypted;
     lastInboxMessages = updateInboxMessage(lastInboxMessages, messageId, { claimed: true });
+    await refreshCurrentTapState();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     inboxMessageErrors[messageId] = message;
@@ -1820,6 +1922,13 @@ async function sendMessage(): Promise<void> {
 
     // Commit state
     pipeState = { myBalance: newMyBalance, serverBalance: newServerBalance, nonce: newNonce };
+    pipeBalanceBreakdown = {
+      settledMyBalance: null,
+      settledServerBalance: null,
+      pendingMyBalance: null,
+      pendingServerBalance: null,
+    };
+    updateIdentityUI();
     (document.getElementById('pay-balance') as HTMLElement).textContent = formatPaymentAmount(pipeState.myBalance);
     (document.getElementById('pay-nonce') as HTMLElement).textContent   = `${pipeState.nonce}`;
 
@@ -1877,6 +1986,7 @@ async function loadStatus(): Promise<void> {
     }
     serverStatus = data;
     updateAdminSectionVisibility();
+    populateAdminSettingsForm(extractRuntimeSettings(data));
     dot.className    = data.ok ? 'dot green' : 'dot red';
     label.textContent = data.ok ? 'Stackmail Server — Online' : 'Server returned error';
     (document.getElementById('s-addr') as HTMLElement).textContent     = String(data.serverAddress || '—');
@@ -1892,9 +2002,26 @@ async function loadStatus(): Promise<void> {
         : (typeof data.serverAddress === 'string' ? data.serverAddress.trim() : '');
       if (candidate) adminAgentInput.value = candidate;
     }
+    await refreshCurrentTapState();
   } catch {
     dot.className    = 'dot red';
     label.textContent = 'Cannot reach server';
+  }
+}
+
+async function refreshStatusPanel(): Promise<void> {
+  const btn = document.getElementById('refresh-status-btn') as HTMLButtonElement | null;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Refreshing…';
+  }
+  try {
+    await loadStatus();
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Refresh';
+    }
   }
 }
 
@@ -2082,6 +2209,83 @@ async function setReservoirAgent(): Promise<void> {
   }
 }
 
+async function saveAdminRuntimeSettings(): Promise<void> {
+  const btn = document.getElementById('admin-save-settings-btn') as HTMLButtonElement;
+  const statusEl = document.getElementById('admin-settings-status') as HTMLElement;
+
+  if (!walletAddress) {
+    statusEl.innerHTML = '<div class="alert alert-warning">Connect wallet first.</div>';
+    return;
+  }
+  if (!connectedUserIsReservoirAdmin()) {
+    statusEl.innerHTML = '<div class="alert alert-warning">Only the reservoir deployer can use this control.</div>';
+    return;
+  }
+
+  const readInt = (id: string, label: string): number => {
+    const raw = (document.getElementById(id) as HTMLInputElement).value.trim();
+    if (!/^\d+$/.test(raw)) throw new Error(`${label} must be a non-negative integer`);
+    return Number(raw);
+  };
+  const readUintString = (id: string, label: string): string => {
+    const raw = (document.getElementById(id) as HTMLInputElement).value.trim();
+    if (!/^\d+$/.test(raw)) throw new Error(`${label} must be a non-negative integer`);
+    return raw;
+  };
+
+  let payload: RuntimeSettingsPayload;
+  try {
+    payload = {
+      messagePriceSats: readUintString('admin-message-price-input', 'Message Price'),
+      minFeeSats: readUintString('admin-min-fee-input', 'Minimum Fee'),
+      maxPendingPerSender: readInt('admin-max-pending-sender-input', 'Max Pending / Sender'),
+      maxPendingPerRecipient: readInt('admin-max-pending-recipient-input', 'Max Pending / Recipient'),
+      maxDeferredPerSender: readInt('admin-max-deferred-sender-input', 'Max Deferred / Sender'),
+      maxDeferredPerRecipient: readInt('admin-max-deferred-recipient-input', 'Max Deferred / Recipient'),
+      maxDeferredGlobal: readInt('admin-max-deferred-global-input', 'Max Deferred / Global'),
+      deferredMessageTtlMs: readInt('admin-deferred-ttl-input', 'Deferred TTL'),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    statusEl.innerHTML = `<div class="alert alert-warning">${escHtml(message)}</div>`;
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Saving…';
+  statusEl.innerHTML = '';
+
+  try {
+    const response = await apiFetch('/admin/settings', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-stackmail-auth': await buildWalletAuthHeader('admin-settings'),
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok) {
+      throw new Error(String(data.message ?? data.error ?? `Save failed: ${response.status}`));
+    }
+    const settings = extractRuntimeSettings({ runtimeSettings: data.settings });
+    if (settings) {
+      serverStatus.runtimeSettings = settings;
+      serverStatus.messagePriceSats = settings.messagePriceSats;
+      serverStatus.minFeeSats = settings.minFeeSats;
+      populateAdminSettingsForm(settings);
+    }
+    await loadStatus();
+    statusEl.innerHTML = '<div class="alert alert-success">Runtime settings saved.</div>';
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    statusEl.innerHTML = `<div class="alert alert-error">${escHtml(message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save Stackmail Settings';
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tab switching
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2105,13 +2309,29 @@ function escHtml(s: string): string {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function copyToClipboard(text: string): void {
-  navigator.clipboard.writeText(text).catch(() => {
-    const ta = document.createElement('textarea');
-    ta.value = text; ta.style.cssText = 'position:fixed;opacity:0';
-    document.body.appendChild(ta); ta.select();
-    document.execCommand('copy'); document.body.removeChild(ta);
-  });
+async function copyToClipboard(text: string): Promise<boolean> {
+  const clipboard = globalThis.navigator?.clipboard;
+  if (clipboard?.writeText) {
+    try {
+      await clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall back for non-secure origins or restricted clipboard permissions.
+    }
+  }
+
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  ta.setSelectionRange(0, ta.value.length);
+  try {
+    return document.execCommand('copy');
+  } finally {
+    document.body.removeChild(ta);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2135,6 +2355,7 @@ document.getElementById('clear-decrypt-key-btn')!.addEventListener('click', clea
 document.getElementById('send-btn')!.addEventListener('click', sendMessage);
 document.getElementById('admin-set-agent-btn')!.addEventListener('click', setReservoirAgent);
 document.getElementById('admin-set-rate-btn')!.addEventListener('click', setBorrowRate);
+document.getElementById('admin-save-settings-btn')!.addEventListener('click', saveAdminRuntimeSettings);
 document.getElementById('inbox-list')!.addEventListener('click', async (event) => {
   const target = event.target as HTMLElement | null;
   const button = target?.closest<HTMLButtonElement>('button[data-action][data-message-id]');
@@ -2157,19 +2378,20 @@ document.getElementById('inbox-list')!.addEventListener('click', async (event) =
   }
 });
 
-document.getElementById('copy-inbox-addr-btn')!.addEventListener('click', () => {
-  copyToClipboard(walletAddress || '');
+document.getElementById('copy-inbox-addr-btn')!.addEventListener('click', async () => {
   const btn = document.getElementById('copy-inbox-addr-btn') as HTMLButtonElement;
-  btn.textContent = 'Copied!';
+  const ok = await copyToClipboard(walletAddress || '');
+  btn.textContent = ok ? 'Copied!' : 'Copy failed';
   setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
 });
 
-document.getElementById('copy-status-addr-btn')!.addEventListener('click', () => {
-  copyToClipboard(walletAddress || '');
+document.getElementById('copy-status-addr-btn')!.addEventListener('click', async () => {
   const btn = document.getElementById('copy-status-addr-btn') as HTMLButtonElement;
-  btn.textContent = 'Copied!';
+  const ok = await copyToClipboard(walletAddress || '');
+  btn.textContent = ok ? 'Copied!' : 'Copy failed';
   setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
 });
+document.getElementById('refresh-status-btn')!.addEventListener('click', refreshStatusPanel);
 
 // Auto-fetch recipient info when a valid address is typed
 let toDebounceTimer: ReturnType<typeof setTimeout> | null = null;

@@ -189,6 +189,43 @@ What the server currently retains for manual dispute handling:
 - revealed secrets for claimed messages
 - recipient-side pending payment proofs accepted during claim
 
+## Future Product Direction
+
+Not part of the first deployment, but worth keeping in view:
+
+- multiple reservoirs with different supported assets
+- sender-paid asset and recipient-received asset may differ
+- examples:
+  - sender pays in sBTC, recipient receives in USDCx
+  - sender pays in STX, recipient receives in sBTC
+
+That likely implies:
+
+- explicit pricing asset and payout asset metadata
+- either per-reservoir FX logic or cross-reservoir settlement
+- clearer fee accounting across asset boundaries
+
+Current deployment assumption remains:
+
+- one reservoir
+- one supported token
+- same asset on both sides of the payment
+
+## Runtime Settings
+
+Operational settings are now stored in DB-backed admin config:
+
+- message price
+- minimum fee
+- queue/deferred caps
+- deferred TTL
+
+Current model:
+
+- env vars provide startup defaults
+- SQLite stores the live runtime values
+- only the reservoir deployer can update them through the admin UI
+
 ## Enforceable vs Optimistic State
 
 The server now needs to distinguish two kinds of incoming sender state:

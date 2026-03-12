@@ -597,8 +597,11 @@
     <!-- Status tab -->
     <div class="tab-panel" id="tab-status">
       <div class="status-row">
-        <div class="dot" id="health-dot"></div>
-        <span class="status-label" id="health-label">Checking server…</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="dot" id="health-dot"></div>
+          <span class="status-label" id="health-label">Checking server…</span>
+        </div>
+        <button class="btn btn-secondary btn-sm" id="refresh-status-btn">Refresh</button>
       </div>
 
       <div class="grid-2" id="status-cards">
@@ -658,6 +661,47 @@
           </div>
           <button class="btn btn-secondary" id="admin-set-rate-btn">Set Borrow Rate</button>
           <div id="admin-rate-status" style="margin-top:10px"></div>
+          <hr class="divider">
+          <div class="card-title">Stackmail Runtime Settings</div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            These values are stored server-side and applied immediately without restarting the process.
+          </div>
+          <div class="grid-2">
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="admin-message-price-input">Message Price</label>
+              <input type="text" id="admin-message-price-input" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="admin-min-fee-input">Minimum Fee</label>
+              <input type="text" id="admin-min-fee-input" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="admin-max-pending-sender-input">Max Pending / Sender</label>
+              <input type="text" id="admin-max-pending-sender-input" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="admin-max-pending-recipient-input">Max Pending / Recipient</label>
+              <input type="text" id="admin-max-pending-recipient-input" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="admin-max-deferred-sender-input">Max Deferred / Sender</label>
+              <input type="text" id="admin-max-deferred-sender-input" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="admin-max-deferred-recipient-input">Max Deferred / Recipient</label>
+              <input type="text" id="admin-max-deferred-recipient-input" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="admin-max-deferred-global-input">Max Deferred / Global</label>
+              <input type="text" id="admin-max-deferred-global-input" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="admin-deferred-ttl-input">Deferred TTL (ms)</label>
+              <input type="text" id="admin-deferred-ttl-input" spellcheck="false" autocomplete="off" />
+            </div>
+          </div>
+          <button class="btn btn-secondary" id="admin-save-settings-btn">Save Stackmail Settings</button>
+          <div id="admin-settings-status" style="margin-top:10px"></div>
         </div>
       </div>
     </div>

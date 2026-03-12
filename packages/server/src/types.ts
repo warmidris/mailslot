@@ -129,7 +129,9 @@ export interface Config {
   reservoirContractId: string;
   /** Stacks chain ID: 1 = mainnet, 2147483648 = testnet/devnet */
   chainId: number;
+  /** Startup default for runtime-configurable message price */
   messagePriceSats: string;
+  /** Startup default for runtime-configurable fee */
   minFeeSats: string;
   /** Max unclaimed messages allowed from a single sender to a single recipient */
   maxPendingPerSender: number;
@@ -144,6 +146,40 @@ export interface Config {
   /** How long deferred sender-paid messages remain retryable */
   deferredMessageTtlMs: number;
   inboxSessionTtlMs: number;
+}
+
+export interface RuntimeSettings {
+  messagePriceSats: string;
+  minFeeSats: string;
+  maxPendingPerSender: number;
+  maxPendingPerRecipient: number;
+  maxDeferredPerSender: number;
+  maxDeferredPerRecipient: number;
+  maxDeferredGlobal: number;
+  deferredMessageTtlMs: number;
+}
+
+export function runtimeSettingsFromConfig(config: Pick<
+  Config,
+  | 'messagePriceSats'
+  | 'minFeeSats'
+  | 'maxPendingPerSender'
+  | 'maxPendingPerRecipient'
+  | 'maxDeferredPerSender'
+  | 'maxDeferredPerRecipient'
+  | 'maxDeferredGlobal'
+  | 'deferredMessageTtlMs'
+>): RuntimeSettings {
+  return {
+    messagePriceSats: config.messagePriceSats,
+    minFeeSats: config.minFeeSats,
+    maxPendingPerSender: config.maxPendingPerSender,
+    maxPendingPerRecipient: config.maxPendingPerRecipient,
+    maxDeferredPerSender: config.maxDeferredPerSender,
+    maxDeferredPerRecipient: config.maxDeferredPerRecipient,
+    maxDeferredGlobal: config.maxDeferredGlobal,
+    deferredMessageTtlMs: config.deferredMessageTtlMs,
+  };
 }
 
 export function loadConfig(): Config {

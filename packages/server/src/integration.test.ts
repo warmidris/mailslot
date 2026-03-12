@@ -16,6 +16,8 @@ import type { Config } from './types.js';
 import type { PendingPayment } from './types.js';
 import type { VerifiedPayment } from './payment.js';
 import type { Server } from 'node:http';
+import { RuntimeSettingsStore } from './settings.js';
+import { runtimeSettingsFromConfig } from './types.js';
 
 // ─── Mock payment service ──────────────────────────────────────────────────────
 
@@ -172,7 +174,7 @@ const senderPubkeyHex = senderSignKeypair.compressedPubkeyHex;
 const recipientSignKeypair = generateSecp256k1Keypair();
 const recipientEcdhForEncrypt = createECDH('secp256k1');
 recipientEcdhForEncrypt.generateKeys();
-const recipientEncryptPrivkeyHex = recipientEcdhForEncrypt.getPrivateKey('hex');
+const recipientEncryptPrivkeyHex = recipientEcdhForEncrypt.getPrivateKey().toString('hex').padStart(64, '0');
 const recipientEncryptPubkeyHex = recipientEcdhForEncrypt.getPublicKey('hex', 'compressed');
 
 const recipientAddress = pubkeyToStxAddress(recipientSignKeypair.compressedPubkeyHex);
@@ -205,13 +207,17 @@ let server: Server;
 let baseUrl: string;
 let store: SqliteMessageStore;
 let paymentService: MockPaymentService;
+let settingsStore: RuntimeSettingsStore;
 
 beforeAll(async () => {
   store = new SqliteMessageStore(':memory:');
   await store.init();
 
   paymentService = new MockPaymentService();
-  server = createMailServer(serverConfig, store, paymentService);
+  const { default: Database } = await import('better-sqlite3');
+  const db = new Database(':memory:');
+  settingsStore = new RuntimeSettingsStore(db, runtimeSettingsFromConfig(serverConfig));
+  server = createMailServer(serverConfig, store, paymentService, settingsStore);
 
   await new Promise<void>(resolve => {
     server.listen(0, '127.0.0.1', () => resolve());
@@ -235,6 +241,65 @@ describe('GET /health', () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { ok: boolean };
     expect(body.ok).toBe(true);
+  });
+});
+
+describe('admin runtime settings', () => {
+  it('allows the reservoir deployer to update runtime settings in the DB', async () => {
+    const adminKeypair = generateSecp256k1Keypair();
+    const adminAddress = pubkeyToStxAddress(adminKeypair.compressedPubkeyHex);
+    const customConfig: Config = {
+      ...serverConfig,
+      reservoirContractId: `${adminAddress}.sm-reservoir`,
+      sfContractId: `${adminAddress}.sm-stackflow`,
+    };
+
+    const customStore = new SqliteMessageStore(':memory:');
+    await customStore.init();
+    const customService = new MockPaymentService();
+    const { default: Database } = await import('better-sqlite3');
+    const customDb = new Database(':memory:');
+    const customSettings = new RuntimeSettingsStore(customDb, runtimeSettingsFromConfig(customConfig));
+    const customServer = createMailServer(customConfig, customStore, customService, customSettings);
+    await new Promise<void>(resolve => customServer.listen(0, '127.0.0.1', () => resolve()));
+    const addr = customServer.address() as AddressInfo;
+    const customBaseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      const authHeader = buildAuthHeader({
+        pubkey: adminKeypair.compressedPubkeyHex,
+        action: 'admin-settings',
+        address: adminAddress,
+        privateKey: adminKeypair.privateKey,
+      });
+
+      const updateRes = await fetch(`${customBaseUrl}/admin/settings`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-stackmail-auth': authHeader,
+        },
+        body: JSON.stringify({
+          messagePriceSats: '2500',
+          minFeeSats: '250',
+          maxPendingPerSender: 7,
+        }),
+      });
+      expect(updateRes.status).toBe(200);
+      const updateBody = await updateRes.json() as { settings: RuntimeSettingsStore extends never ? never : Record<string, unknown> };
+      expect(updateBody.settings.messagePriceSats).toBe('2500');
+      expect(updateBody.settings.minFeeSats).toBe('250');
+      expect(updateBody.settings.maxPendingPerSender).toBe(7);
+
+      const statusRes = await fetch(`${customBaseUrl}/status`);
+      expect(statusRes.status).toBe(200);
+      const statusBody = await statusRes.json() as { messagePriceSats: string; minFeeSats: string; runtimeSettings: Record<string, unknown> };
+      expect(statusBody.messagePriceSats).toBe('2500');
+      expect(statusBody.minFeeSats).toBe('250');
+      expect(statusBody.runtimeSettings.maxPendingPerSender).toBe(7);
+    } finally {
+      await new Promise<void>((resolve, reject) => customServer.close(err => err ? reject(err) : resolve()));
+    }
   });
 });
 
@@ -680,7 +745,10 @@ describe('claim finalization', () => {
     const finalizeStore = new SqliteMessageStore(':memory:');
     await finalizeStore.init();
     const finalizeService = new MockPaymentService();
-    const finalizeServer = createMailServer(serverConfig, finalizeStore, finalizeService);
+    const { default: Database } = await import('better-sqlite3');
+    const finalizeDb = new Database(':memory:');
+    const finalizeSettings = new RuntimeSettingsStore(finalizeDb, runtimeSettingsFromConfig(serverConfig));
+    const finalizeServer = createMailServer(serverConfig, finalizeStore, finalizeService, finalizeSettings);
     await new Promise<void>(r => finalizeServer.listen(0, '127.0.0.1', () => r()));
     const finalizeUrl = `http://127.0.0.1:${(finalizeServer.address() as AddressInfo).port}`;
 
@@ -747,7 +815,10 @@ describe('sender cancel', () => {
     const cancelStore = new SqliteMessageStore(':memory:');
     await cancelStore.init();
     const cancelService = new MockPaymentService();
-    const cancelServer = createMailServer(serverConfig, cancelStore, cancelService);
+    const { default: Database } = await import('better-sqlite3');
+    const cancelDb = new Database(':memory:');
+    const cancelSettings = new RuntimeSettingsStore(cancelDb, runtimeSettingsFromConfig(serverConfig));
+    const cancelServer = createMailServer(serverConfig, cancelStore, cancelService, cancelSettings);
     await new Promise<void>(r => cancelServer.listen(0, '127.0.0.1', () => r()));
     const cancelUrl = `http://127.0.0.1:${(cancelServer.address() as AddressInfo).port}`;
 
@@ -852,7 +923,10 @@ describe('per-sender HTLC cap', () => {
     // Use a payment service that always approves with same hashedSecret + distinct secrets
     const capService = new MockPaymentService();
     const capConfig = { ...serverConfig, maxPendingPerSender: 2 };
-    const capServer = createMailServer(capConfig, capStore, capService);
+    const { default: Database } = await import('better-sqlite3');
+    const capDb = new Database(':memory:');
+    const capSettings = new RuntimeSettingsStore(capDb, runtimeSettingsFromConfig(capConfig));
+    const capServer = createMailServer(capConfig, capStore, capService, capSettings);
     await new Promise<void>(r => capServer.listen(0, '127.0.0.1', () => r()));
     const capUrl = `http://127.0.0.1:${(capServer.address() as AddressInfo).port}`;
 
@@ -888,7 +962,10 @@ describe('per-sender HTLC cap', () => {
 
     const capService = new MockPaymentService();
     const capConfig = { ...serverConfig, maxPendingPerRecipient: 2 };
-    const capServer = createMailServer(capConfig, capStore, capService);
+    const { default: Database } = await import('better-sqlite3');
+    const capDb = new Database(':memory:');
+    const capSettings = new RuntimeSettingsStore(capDb, runtimeSettingsFromConfig(capConfig));
+    const capServer = createMailServer(capConfig, capStore, capService, capSettings);
     await new Promise<void>(r => capServer.listen(0, '127.0.0.1', () => r()));
     const capUrl = `http://127.0.0.1:${(capServer.address() as AddressInfo).port}`;
 

@@ -8,11 +8,12 @@ import { dirname } from 'node:path';
 
 import { createHash } from 'node:crypto';
 
-import { loadConfig, type Config } from './types.js';
+import { loadConfig, runtimeSettingsFromConfig, type Config } from './types.js';
 import { SqliteMessageStore } from './store.js';
 import { ReservoirService } from './reservoir.js';
 import { createMailServer } from './app.js';
 import { pubkeyToStxAddress, hash160ToStxAddress } from './auth.js';
+import { RuntimeSettingsStore } from './settings.js';
 
 type ServerIdentitySource = 'env' | 'db' | 'generated';
 
@@ -228,19 +229,20 @@ async function main(): Promise<void> {
     console.warn('stackmail: reservoir contract not configured — tap onboarding disabled');
   }
 
+  const runtimeSettings = new RuntimeSettingsStore(reservoirDb, runtimeSettingsFromConfig(config));
+
   const reservoir = new ReservoirService({
     db: reservoirDb,
+    settings: runtimeSettings,
     serverAddress: config.reservoirContractId || config.serverStxAddress,
     signerAddress: config.serverStxAddress,
     reservoirContractId: config.reservoirContractId,
     serverPrivateKey: config.serverPrivateKey,
     contractId: config.sfContractId,
     chainId: config.chainId,
-    minFeeSats: config.minFeeSats,
-    messagePriceSats: config.messagePriceSats,
   });
 
-  const server = createMailServer(config, store, reservoir);
+  const server = createMailServer(config, store, reservoir, runtimeSettings);
 
   server.listen(config.port, config.host, () => {
     console.log(`stackmail: listening on ${config.host}:${config.port}`);

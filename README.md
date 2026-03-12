@@ -80,6 +80,7 @@ Including `fromPublicKey` on send lets the server register the sender immediatel
 
 - [`scripts/repair-mainnet-mailbox.mjs`](./scripts/repair-mainnet-mailbox.mjs) repairs the current mainnet mailbox path on the existing reservoir by setting the agent and borrowing receive liquidity.
 - [`scripts/recover-mainnet-reservoir.mjs`](./scripts/recover-mainnet-reservoir.mjs) deploys a fresh reservoir contract, initializes it, funds liquidity, opens a mailbox, and updates local env config. This path still requires enough deployer STX for contract deployment gas.
+- [`scripts/backup_db.py`](./scripts/backup_db.py) creates a consistent SQLite snapshot for backups and migrations.
 
 ## Docker Persistence
 
@@ -97,4 +98,18 @@ Avoid `docker compose down -v` if you are using named volumes and want to keep s
 
 ## Status
 
-Early development. Not ready for production use.
+Controlled beta only. The current recommended deployment target is Fly.io with one persistent volume. See [HOSTING.md](./HOSTING.md).
+
+## Admin Runtime Settings
+
+The reservoir deployer can now update live operational settings from the web UI admin section. These settings are stored in SQLite and survive restarts.
+
+Current admin-managed settings:
+
+- message price
+- minimum fee
+- pending message caps
+- deferred message caps
+- deferred TTL
+
+Env vars remain the startup defaults, but the DB is the live runtime source of truth after boot.

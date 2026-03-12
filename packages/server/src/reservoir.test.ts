@@ -4,6 +4,8 @@ import { noneCV, principalCV, responseOkCV, serializeCVBytes, someCV, tupleCV, u
 import { ReservoirService } from './reservoir.js';
 import { buildTransferMessage, sip018Sign, type TransferState } from './sip018.js';
 import { pubkeyToStxAddress } from './auth.js';
+import { RuntimeSettingsStore } from './settings.js';
+import { runtimeSettingsFromConfig } from './types.js';
 
 function privKeyHex(): string {
   return Buffer.from(secp256k1.utils.randomPrivateKey()).toString('hex');
@@ -30,6 +32,19 @@ function canonicalPipePrincipals(a: string, b: string): { 'principal-1': string;
 
 function pipeId(contractId: string, p1: string, p2: string): string {
   return `${contractId}|stx|${p1}|${p2}`;
+}
+
+function makeSettingsStore(db: import('better-sqlite3').Database) {
+  return new RuntimeSettingsStore(db, runtimeSettingsFromConfig({
+    messagePriceSats: '500',
+    minFeeSats: '100',
+    maxPendingPerSender: 5,
+    maxPendingPerRecipient: 20,
+    maxDeferredPerSender: 5,
+    maxDeferredPerRecipient: 20,
+    maxDeferredGlobal: 200,
+    deferredMessageTtlMs: 86_400_000,
+  }));
 }
 
 function encodeSomePipe(args: {
@@ -75,12 +90,11 @@ describe('ReservoirService', () => {
     const serverAddress = stxAddressFromPrivkey(serverPriv);
     const service = new ReservoirService({
       db,
+      settings: makeSettingsStore(db),
       serverAddress,
       serverPrivateKey: '',
       contractId: `${serverAddress}.stackflow-test`,
       chainId: 1,
-      minFeeSats: '100',
-      messagePriceSats: '500',
     });
 
     await expect(service.verifyIncomingPayment(JSON.stringify({
@@ -102,12 +116,11 @@ describe('ReservoirService', () => {
     const contractId = `${serverAddress}.stackflow-test`;
     const service = new ReservoirService({
       db,
+      settings: makeSettingsStore(db),
       serverAddress,
       serverPrivateKey: serverPriv,
       contractId,
       chainId: 1,
-      minFeeSats: '100',
-      messagePriceSats: '500',
     });
 
     const principals = canonicalPipePrincipals(serverAddress, senderAddress);
@@ -188,12 +201,11 @@ describe('ReservoirService', () => {
     const contractId = `${serverAddress}.stackflow-test`;
     const service = new ReservoirService({
       db,
+      settings: makeSettingsStore(db),
       serverAddress,
       serverPrivateKey: serverPriv,
       contractId,
       chainId: 1,
-      minFeeSats: '100',
-      messagePriceSats: '500',
     });
 
     const canonical = canonicalPipePrincipals(serverAddress, senderAddress);
@@ -236,14 +248,13 @@ describe('ReservoirService', () => {
     const contractId = `${signerAddress}.sm-stackflow`;
     const service = new ReservoirService({
       db,
+      settings: makeSettingsStore(db),
       serverAddress: reservoirContractId,
       signerAddress,
       reservoirContractId,
       serverPrivateKey: serverPriv,
       contractId,
       chainId: 1,
-      minFeeSats: '100',
-      messagePriceSats: '500',
     });
 
     const principals = canonicalPipePrincipals(borrowerAddress, reservoirContractId);
@@ -307,12 +318,11 @@ describe('ReservoirService', () => {
     const contractId = `${serverAddress}.sm-stackflow`;
     const service = new ReservoirService({
       db,
+      settings: makeSettingsStore(db),
       serverAddress,
       serverPrivateKey: serverPriv,
       contractId,
       chainId: 1,
-      minFeeSats: '100',
-      messagePriceSats: '500',
     });
 
     const principals = canonicalPipePrincipals(serverAddress, senderAddress);
@@ -374,12 +384,11 @@ describe('ReservoirService', () => {
     const contractId = `${serverAddress}.sm-stackflow`;
     const service = new ReservoirService({
       db,
+      settings: makeSettingsStore(db),
       serverAddress,
       serverPrivateKey: serverPriv,
       contractId,
       chainId: 1,
-      minFeeSats: '100',
-      messagePriceSats: '500',
     });
 
     const principals = canonicalPipePrincipals(serverAddress, senderAddress);
@@ -449,12 +458,11 @@ describe('ReservoirService', () => {
     const contractId = `${serverAddress}.stackflow-test`;
     const service = new ReservoirService({
       db,
+      settings: makeSettingsStore(db),
       serverAddress,
       serverPrivateKey: serverPriv,
       contractId,
       chainId: 1,
-      minFeeSats: '100',
-      messagePriceSats: '500',
     });
 
     const principals = canonicalPipePrincipals(serverAddress, senderAddress);

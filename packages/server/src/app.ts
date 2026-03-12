@@ -11,8 +11,9 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 
-import type { Config } from './types.js';
+import type { Config, RuntimeSettings } from './types.js';
 import type { MessageStore } from './store.js';
+import type { RuntimeSettingsStore } from './settings.js';
 import { PaymentError } from './payment.js';
 import type { VerifiedPayment } from './payment.js';
 import type { PendingPayment } from './types.js';
@@ -73,6 +74,7 @@ export function createMailServer(
   config: Config,
   store: MessageStore,
   paymentService: IPaymentService,
+  settingsStore: RuntimeSettingsStore,
 ): ReturnType<typeof createServer> {
   const sfContractId = config.sfContractId;
   const pipeCounterparty = config.reservoirContractId || config.serverStxAddress;
@@ -80,9 +82,14 @@ export function createMailServer(
   const WEB_DIR = join(dirname(__filename), '..', 'web');
   const WEB_DIR_RESOLVED = resolve(WEB_DIR);
 
+  function currentSettings(): RuntimeSettings {
+    return settingsStore.get();
+  }
+
   function buildPaymentInfo(recipientAddr: string, recipientPublicKey: string) {
-    const amount = BigInt(config.messagePriceSats);
-    const fee = BigInt(config.minFeeSats);
+    const settings = currentSettings();
+    const amount = BigInt(settings.messagePriceSats);
+    const fee = BigInt(settings.minFeeSats);
     const recipientAmount = amount > fee ? amount - fee : 0n;
     return {
       recipientPublicKey,
@@ -98,8 +105,9 @@ export function createMailServer(
   async function activateDeferredMessages(recipientAddr: string): Promise<void> {
     if (!sfContractId) return;
     const now = Date.now();
+    const settings = currentSettings();
     await store.expireDeferredMessages(now);
-    const deferred = await store.getDeferredMessagesForRecipient(recipientAddr, now, config.maxPendingPerRecipient);
+    const deferred = await store.getDeferredMessagesForRecipient(recipientAddr, now, settings.maxPendingPerRecipient);
     for (const message of deferred) {
       const pendingPayment = await paymentService.createOutgoingPayment({
         hashedSecret: message.hashedSecret,
@@ -117,15 +125,91 @@ export function createMailServer(
     return tracked == null ? 'no-recipient-tap' : 'insufficient-recipient-liquidity';
   }
 
+  function reservoirAdminAddress(): string | null {
+    const [address] = (config.reservoirContractId ?? '').split('.');
+    return address && /^S[PT][0-9A-Z]{39}$/.test(address) ? address : null;
+  }
+
+  async function requireAdminAuth(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
+    const authHeader = req.headers['x-stackmail-auth'];
+    if (!authHeader) {
+      json(res, 401, { error: 'auth-required', message: 'x-stackmail-auth header required' });
+      return null;
+    }
+    try {
+      const auth = await verifyInboxAuth(
+        Array.isArray(authHeader) ? authHeader[0] : authHeader,
+        config,
+        store,
+      );
+      const adminAddress = reservoirAdminAddress();
+      if (!adminAddress || auth.payload.address !== adminAddress) {
+        json(res, 403, { error: 'admin-required', message: 'Only the reservoir deployer may update runtime settings' });
+        return null;
+      }
+      return auth.payload.address;
+    } catch (err) {
+      if (err instanceof AuthError) {
+        json(res, err.statusCode, { error: err.reason, message: err.message });
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  async function handleGetAdminSettings(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const admin = await requireAdminAuth(req, res);
+    if (!admin) return;
+    return json(res, 200, { ok: true, admin, settings: currentSettings() });
+  }
+
+  async function handleUpdateAdminSettings(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const admin = await requireAdminAuth(req, res);
+    if (!admin) return;
+
+    let body: string;
+    try {
+      body = await readBody(req, 16_384);
+    } catch {
+      return json(res, 413, { error: 'body-too-large' });
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      return json(res, 400, { error: 'invalid-json' });
+    }
+
+    const patch: Partial<RuntimeSettings> = {};
+    if (parsed['messagePriceSats'] != null) patch.messagePriceSats = String(parsed['messagePriceSats']);
+    if (parsed['minFeeSats'] != null) patch.minFeeSats = String(parsed['minFeeSats']);
+    if (parsed['maxPendingPerSender'] != null) patch.maxPendingPerSender = Number(parsed['maxPendingPerSender']);
+    if (parsed['maxPendingPerRecipient'] != null) patch.maxPendingPerRecipient = Number(parsed['maxPendingPerRecipient']);
+    if (parsed['maxDeferredPerSender'] != null) patch.maxDeferredPerSender = Number(parsed['maxDeferredPerSender']);
+    if (parsed['maxDeferredPerRecipient'] != null) patch.maxDeferredPerRecipient = Number(parsed['maxDeferredPerRecipient']);
+    if (parsed['maxDeferredGlobal'] != null) patch.maxDeferredGlobal = Number(parsed['maxDeferredGlobal']);
+    if (parsed['deferredMessageTtlMs'] != null) patch.deferredMessageTtlMs = Number(parsed['deferredMessageTtlMs']);
+
+    try {
+      const next = settingsStore.update(patch);
+      return json(res, 200, { ok: true, admin, settings: next });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return json(res, 400, { error: 'invalid-runtime-settings', message });
+    }
+  }
+
   // ─── Handlers ──────────────────────────────────────────────────────────────
 
   async function handleSend(req: IncomingMessage, res: ServerResponse, to: string): Promise<void> {
     const paymentHeader = req.headers['x-x402-payment'] ?? req.headers['x-stackmail-payment'];
     if (!paymentHeader) {
+      const settings = currentSettings();
       return json(res, 402, {
         error: 'payment-required',
         accepts: [{ mode: 'direct', scheme: 'stackflow' }],
-        amount: config.messagePriceSats,
+        amount: settings.messagePriceSats,
         stackflowNodeUrl: config.stackflowNodeUrl,
         serverAddress: pipeCounterparty,
       });
@@ -201,19 +285,20 @@ export function createMailServer(
       return json(res, 413, { error: 'payload-too-large' });
     }
 
+    const settings = currentSettings();
     // Per-sender HTLC cap: prevent spam by limiting unclaimed messages
     const pendingCount = await store.countPendingFromSender(verified.senderAddress, to);
-    if (pendingCount >= config.maxPendingPerSender) {
+    if (pendingCount >= settings.maxPendingPerSender) {
       return json(res, 429, {
         error: 'too-many-pending',
-        message: `Too many unclaimed messages from this sender (limit: ${config.maxPendingPerSender})`,
+        message: `Too many unclaimed messages from this sender (limit: ${settings.maxPendingPerSender})`,
       });
     }
     const recipientPendingCount = await store.countPendingToRecipient(to);
-    if (recipientPendingCount >= config.maxPendingPerRecipient) {
+    if (recipientPendingCount >= settings.maxPendingPerRecipient) {
       return json(res, 429, {
         error: 'recipient-inbox-full',
-        message: `Recipient inbox already has too many unclaimed messages (limit: ${config.maxPendingPerRecipient})`,
+        message: `Recipient inbox already has too many unclaimed messages (limit: ${settings.maxPendingPerRecipient})`,
       });
     }
 
@@ -228,24 +313,24 @@ export function createMailServer(
 
     if (sfContractId && pendingPayment == null) {
       const deferredPerSender = await store.countDeferredFromSender(verified.senderAddress, to);
-      if (deferredPerSender >= config.maxDeferredPerSender) {
+      if (deferredPerSender >= settings.maxDeferredPerSender) {
         return json(res, 429, {
           error: 'too-many-deferred-from-sender',
-          message: `Too many deferred messages from this sender (limit: ${config.maxDeferredPerSender})`,
+          message: `Too many deferred messages from this sender (limit: ${settings.maxDeferredPerSender})`,
         });
       }
       const deferredPerRecipient = await store.countDeferredToRecipient(to);
-      if (deferredPerRecipient >= config.maxDeferredPerRecipient) {
+      if (deferredPerRecipient >= settings.maxDeferredPerRecipient) {
         return json(res, 429, {
           error: 'too-many-deferred-for-recipient',
-          message: `Recipient already has too many deferred messages (limit: ${config.maxDeferredPerRecipient})`,
+          message: `Recipient already has too many deferred messages (limit: ${settings.maxDeferredPerRecipient})`,
         });
       }
       const deferredGlobal = await store.countDeferredGlobal();
-      if (deferredGlobal >= config.maxDeferredGlobal) {
+      if (deferredGlobal >= settings.maxDeferredGlobal) {
         return json(res, 429, {
           error: 'deferred-queue-full',
-          message: `Server deferred queue is full (limit: ${config.maxDeferredGlobal})`,
+          message: `Server deferred queue is full (limit: ${settings.maxDeferredGlobal})`,
         });
       }
 
@@ -257,14 +342,14 @@ export function createMailServer(
         to,
         sentAt: Date.now(),
         amount: verified.incomingAmount,
-        fee: config.minFeeSats,
+        fee: settings.minFeeSats,
         paymentId: proofRaw,
         hashedSecret: verified.hashedSecret,
         encryptedPayload,
         pendingPayment: null,
         deliveryState: 'deferred',
         deferredReason,
-        deferredUntil: Date.now() + config.deferredMessageTtlMs,
+        deferredUntil: Date.now() + settings.deferredMessageTtlMs,
         claimed: false,
         paymentSettled: false,
       });
@@ -283,7 +368,7 @@ export function createMailServer(
       to,
       sentAt: Date.now(),
       amount: verified.incomingAmount,
-      fee: config.minFeeSats,
+      fee: settings.minFeeSats,
       paymentId: proofRaw,
       hashedSecret: verified.hashedSecret,
       encryptedPayload,
@@ -580,14 +665,16 @@ export function createMailServer(
 
     // Status endpoint
     if (method === 'GET' && path === '/status') {
+      const settings = currentSettings();
       return json(res, 200, {
         ok: true,
         serverAddress: pipeCounterparty,
         signerAddress: config.serverStxAddress,
         reservoirContract: config.reservoirContractId,
         sfContract: config.sfContractId,
-        messagePriceSats: config.messagePriceSats,
-        minFeeSats: config.minFeeSats,
+        messagePriceSats: settings.messagePriceSats,
+        minFeeSats: settings.minFeeSats,
+        runtimeSettings: settings,
         network: config.chainId === 1 ? 'mainnet' : 'testnet',
         chainId: config.chainId,
         authDomain: AUTH_DOMAIN,
@@ -597,6 +684,14 @@ export function createMailServer(
 
     if (method === 'GET' && path === '/tap/state') {
       return handleTapState(req, res);
+    }
+
+    if (method === 'GET' && path === '/admin/settings') {
+      return handleGetAdminSettings(req, res);
+    }
+
+    if (method === 'POST' && path === '/admin/settings') {
+      return handleUpdateAdminSettings(req, res);
     }
 
     const paymentInfoMatch = path.match(/^\/payment-info\/([^/]+)$/);

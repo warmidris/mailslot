@@ -9,6 +9,7 @@
  */
 
 import type { PendingPayment } from './types.js';
+import type { RuntimeSettingsStore } from './settings.js';
 import { cvToValue, hexToCV, noneCV, principalCV, serializeCVBytes, someCV, uintCV } from '@stacks/transactions';
 import type { ClarityValue } from '@stacks/transactions';
 import { buildTransferMessage, sip018Sign, sip018Verify, type TransferState } from './sip018.js';
@@ -70,7 +71,14 @@ interface OnChainPipeState {
   balance2: bigint;
   pending1: bigint;
   pending2: bigint;
+  pendingLeg1?: PendingLeg;
+  pendingLeg2?: PendingLeg;
   nonce: bigint;
+}
+
+interface PendingLeg {
+  amount: bigint;
+  burnHeight: bigint | null;
 }
 
 function serializePrincipalForSort(principal: string): Buffer {
@@ -140,6 +148,21 @@ function extractUintFromCv(cv: ClarityValue): bigint | null {
   return null;
 }
 
+async function fetchCurrentBurnBlockHeight(chainId: number): Promise<bigint | null> {
+  try {
+    const response = await fetch(`${chainIdToHiroApi(chainId)}/v2/info`);
+    if (!response.ok) return null;
+    const payload = await response.json() as Record<string, unknown>;
+    const raw = payload['burn_block_height'] ?? payload['burnBlockHeight'];
+    if (typeof raw === 'number' || typeof raw === 'string' || typeof raw === 'bigint') {
+      return BigInt(raw);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 interface PipeUpdateMeta {
   action?: string | null;
   actor?: string | null;
@@ -173,29 +196,26 @@ export class ReservoirService {
   private readonly serverPrivateKey: string;
   private readonly contractId: string;
   private readonly chainId: number;
-  private readonly minFeeSats: bigint;
-  private readonly messagePriceSats: bigint;
+  private readonly settings: RuntimeSettingsStore;
 
   constructor(config: {
     db: DB;
+    settings: RuntimeSettingsStore;
     serverAddress: string;
     signerAddress?: string;
     reservoirContractId?: string;
     serverPrivateKey: string;
     contractId: string;
     chainId: number;
-    minFeeSats: string;
-    messagePriceSats: string;
   }) {
     this.db = config.db;
+    this.settings = config.settings;
     this.serverAddress = config.serverAddress;
     this.signerAddress = (config.signerAddress ?? config.serverAddress).trim();
     this.reservoirContractId = (config.reservoirContractId ?? '').trim();
     this.serverPrivateKey = config.serverPrivateKey;
     this.contractId = config.contractId;
     this.chainId = config.chainId;
-    this.minFeeSats = BigInt(config.minFeeSats);
-    this.messagePriceSats = BigInt(config.messagePriceSats);
     this.initTables();
   }
 
@@ -226,18 +246,29 @@ export class ReservoirService {
     };
 
     const onChainPipe = await this.getOnChainPipeState(counterparty, pipeKey);
+    const currentBurnHeight = onChainPipe ? await fetchCurrentBurnBlockHeight(this.chainId) : null;
+    const matureAmount = (leg: PendingLeg | undefined, fallbackAmount: bigint): { settledAdd: bigint; pending: bigint } => {
+      if (!leg) return { settledAdd: 0n, pending: fallbackAmount };
+      if (leg.amount <= 0n) return { settledAdd: 0n, pending: 0n };
+      if (currentBurnHeight != null && leg.burnHeight != null && currentBurnHeight >= leg.burnHeight) {
+        return { settledAdd: leg.amount, pending: 0n };
+      }
+      return { settledAdd: 0n, pending: leg.amount };
+    };
     const serverIsPrincipal1 = pipeKey['principal-1'] === this.serverAddress;
+    const serverPending = matureAmount(serverIsPrincipal1 ? onChainPipe?.pendingLeg1 : onChainPipe?.pendingLeg2, serverIsPrincipal1 ? (onChainPipe?.pending1 ?? 0n) : (onChainPipe?.pending2 ?? 0n));
+    const counterpartyPending = matureAmount(serverIsPrincipal1 ? onChainPipe?.pendingLeg2 : onChainPipe?.pendingLeg1, serverIsPrincipal1 ? (onChainPipe?.pending2 ?? 0n) : (onChainPipe?.pending1 ?? 0n));
     const settledServerBalance = onChainPipe
-      ? (serverIsPrincipal1 ? onChainPipe.balance1 : onChainPipe.balance2).toString()
+      ? ((serverIsPrincipal1 ? onChainPipe.balance1 : onChainPipe.balance2) + serverPending.settledAdd).toString()
       : undefined;
     const settledCounterpartyBalance = onChainPipe
-      ? (serverIsPrincipal1 ? onChainPipe.balance2 : onChainPipe.balance1).toString()
+      ? ((serverIsPrincipal1 ? onChainPipe.balance2 : onChainPipe.balance1) + counterpartyPending.settledAdd).toString()
       : undefined;
     const pendingServerBalance = onChainPipe
-      ? (serverIsPrincipal1 ? onChainPipe.pending1 : onChainPipe.pending2).toString()
+      ? serverPending.pending.toString()
       : undefined;
     const pendingCounterpartyBalance = onChainPipe
-      ? (serverIsPrincipal1 ? onChainPipe.pending2 : onChainPipe.pending1).toString()
+      ? counterpartyPending.pending.toString()
       : undefined;
 
     return {
@@ -742,15 +773,17 @@ export class ReservoirService {
         if (!item) return null;
         return extractUintFromCv(item);
       };
-      const readPendingAmount = (field: string): bigint => {
+      const readPendingLeg = (field: string): PendingLeg => {
         const item = tuple[field];
-        if (!item) return 0n;
-        if (item.type === 'none') return 0n;
-        if (item.type !== 'some') return 0n;
+        if (!item) return { amount: 0n, burnHeight: null };
+        if (item.type === 'none') return { amount: 0n, burnHeight: null };
+        if (item.type !== 'some') return { amount: 0n, burnHeight: null };
         const inner = (item as unknown as { value: ClarityValue }).value;
-        if (inner.type !== 'tuple') return 0n;
-        const amount = extractUintFromCv((inner as unknown as { value: Record<string, ClarityValue> }).value.amount);
-        return amount ?? 0n;
+        if (inner.type !== 'tuple') return { amount: 0n, burnHeight: null };
+        const value = (inner as unknown as { value: Record<string, ClarityValue> }).value;
+        const amount = extractUintFromCv(value.amount) ?? 0n;
+        const burnHeight = value['burn-height'] ? extractUintFromCv(value['burn-height']) : null;
+        return { amount, burnHeight };
       };
 
       const balance1 = readUint('balance-1');
@@ -758,11 +791,15 @@ export class ReservoirService {
       const nonce = readUint('nonce');
       if (balance1 == null || balance2 == null || nonce == null) return null;
 
+      const pendingLeg1 = readPendingLeg('pending-1');
+      const pendingLeg2 = readPendingLeg('pending-2');
       return {
         balance1,
         balance2,
-        pending1: readPendingAmount('pending-1'),
-        pending2: readPendingAmount('pending-2'),
+        pending1: pendingLeg1.amount,
+        pending2: pendingLeg2.amount,
+        pendingLeg1,
+        pendingLeg2,
         nonce,
       };
     } catch {
@@ -777,6 +814,8 @@ export class ReservoirService {
         balance2: BigInt(b2m[1]),
         pending1: p1m ? BigInt(p1m[1]) : 0n,
         pending2: p2m ? BigInt(p2m[1]) : 0n,
+        pendingLeg1: { amount: p1m ? BigInt(p1m[1]) : 0n, burnHeight: null },
+        pendingLeg2: { amount: p2m ? BigInt(p2m[1]) : 0n, burnHeight: null },
         nonce: BigInt(ncm[1]),
       };
     }
@@ -828,6 +867,7 @@ export class ReservoirService {
    *   theirSignature = sender's SIP-018 signature
    */
   async verifyIncomingPayment(proofRaw: string): Promise<VerifiedPayment> {
+    const settings = this.settings.get();
     if (!this.serverPrivateKey) {
       throw new ReservoirError(
         503,
@@ -995,8 +1035,9 @@ export class ReservoirService {
       incomingAmount = serverNewBalance - initialServerBalance;
     }
 
-    if (incomingAmount < this.messagePriceSats) {
-      throw new ReservoirError(402, `payment too low: got ${incomingAmount}, need ${this.messagePriceSats}`, 'payment-too-low');
+    const messagePriceSats = BigInt(settings.messagePriceSats);
+    if (incomingAmount < messagePriceSats) {
+      throw new ReservoirError(402, `payment too low: got ${incomingAmount}, need ${messagePriceSats}`, 'payment-too-low');
     }
 
     // Verify sender's SIP-018 signature
@@ -1061,11 +1102,12 @@ export class ReservoirService {
     recipientAddr: string;
     contractId: string;
   }): Promise<PendingPayment | null> {
+    const settings = this.settings.get();
     if (this.contractId && args.contractId !== this.contractId) {
       throw new ReservoirError(402, `unexpected contractId ${args.contractId}`, 'wrong-contract');
     }
     const outgoingHashedSecret = normalizeHex32(args.hashedSecret);
-    const outgoingAmount = BigInt(args.incomingAmount) - this.minFeeSats;
+    const outgoingAmount = BigInt(args.incomingAmount) - BigInt(settings.minFeeSats);
     if (outgoingAmount <= 0n) return null;
 
     // Find the latest canonical pipe for server↔recipient, regardless of token.

@@ -1,0 +1,8 @@
+node_modules
+packages/*/dist
+packages/server/web
+data
+.env
+.git
+.DS_Store
+npm-debug.log*
