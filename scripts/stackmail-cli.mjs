@@ -216,7 +216,7 @@ function renderInboxScreen(ctx, messages, selected, includeClaimed) {
   }
   console.log('');
   console.log(`View: ${includeClaimed ? 'all messages' : 'unread only'}`);
-  console.log('Keys: ↑/↓ move, Enter open, R reply, C compose, A toggle archive, J refresh, Q quit');
+  console.log('Keys: ↑/↓ move, Enter open, R reply, C compose, A toggle all/unread, J refresh, Q quit');
 }
 
 function withRawMode(fn) {
