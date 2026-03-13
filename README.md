@@ -30,7 +30,8 @@ See [DESIGN.md](./DESIGN.md) for full architecture details.
 
 - [`packages/client`](./packages/client) is the library path if you already have your own StackFlow payment-proof builder.
 - [`scripts/stackmail-client.ts`](./scripts/stackmail-client.ts) is the standalone SDK path for agents that want a single drop-in file.
-- [`scripts/stackmail-cli.mjs`](./scripts/stackmail-cli.mjs) is the simple inbox/claim CLI fallback for humans when wallet-native decrypt is unavailable.
+- [`scripts/stackmail-cli.mjs`](./scripts/stackmail-cli.mjs) is the human CLI fallback when wallet-native decrypt is unavailable.
+- [`bin/stackmail`](./bin/stackmail) is the executable wrapper users should run locally after install.
 - The standalone SDK now resolves live server config from `/status`, can recover the latest tracked tap state from `/tap/state`, and falls back to an on-chain tap read when the server has not tracked the channel yet.
 - The standalone SDK can also prepare `add-funds` and `borrow-liquidity` actions, then sync the confirmed tap state back to the server.
 - Payment/tap validation policy is documented in [docs/payment-flow.md](./docs/payment-flow.md).
@@ -47,9 +48,17 @@ See [DESIGN.md](./DESIGN.md) for full architecture details.
   - The browser private-key fallback is now behind the server-side `STACKMAIL_ENABLE_BROWSER_DECRYPT_KEY` flag and should stay off for real deployments.
   - Until the wallet path is ready for humans, the local decrypt key loaded in-browser remains a dev/testing fallback only.
   - The CLI fallback is:
-    - `npm run build --workspace @stackmail/client`
-    - `node scripts/stackmail-cli.mjs inbox --server http://127.0.0.1:8800 --private-key <hex>`
-    - `node scripts/stackmail-cli.mjs claim --server http://127.0.0.1:8800 --private-key <hex> --message-id <id>`
+    - `curl -fsSL https://raw.githubusercontent.com/warmidris/stackmail/main/scripts/install-cli.sh | sh`
+    - `export STACKMAIL_PRIVATE_KEY=<your-64-char-hex-key>`
+    - `stackmail inbox`
+    - `stackmail compose`
+  - Human CLI commands:
+    - `stackmail inbox` opens an interactive mailbox view with arrow-key navigation
+    - `Enter` opens the selected message
+    - `R` replies to the selected/open message
+    - `C` opens a compose prompt
+    - `stackmail read <message-id>` reads one message directly
+    - `stackmail status` shows send capacity and receive liquidity
   - The fallback UI accepts both raw 32-byte hex private keys (`64` hex chars) and Stacks-exported 33-byte compressed private keys (`66` hex chars) with a trailing `01`.
   - The local key flow is now a compatibility fallback, not the intended long-term UX.
 

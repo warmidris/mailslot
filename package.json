@@ -11,6 +11,9 @@
     "test": "npm run test --workspaces",
     "lint": "npm run lint --workspaces"
   },
+  "dependencies": {
+    "tsx": "^4.20.6"
+  },
   "engines": {
     "node": ">=20"
   }

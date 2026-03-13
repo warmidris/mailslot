@@ -631,15 +631,13 @@ function updateDecryptCliHelp(): void {
   const serverUrl = window.location.origin;
   commandsEl.textContent = [
     'Install:',
-    'git clone https://github.com/warmidris/stackmail.git',
-    'cd stackmail',
-    'npm install',
-    'npm run build --workspace @stackmail/client',
+    'curl -fsSL https://raw.githubusercontent.com/warmidris/stackmail/main/scripts/install-cli.sh | sh',
+    'export STACKMAIL_PRIVATE_KEY=<your-private-key>',
     '',
     'Use:',
-    `node scripts/stackmail-cli.mjs inbox --server ${serverUrl} --private-key <your-private-key>`,
-    `node scripts/stackmail-cli.mjs claim --server ${serverUrl} --private-key <your-private-key> --message-id <message-id>`,
-    `node scripts/stackmail-cli.mjs poll --server ${serverUrl} --private-key <your-private-key>`,
+    `STACKMAIL_SERVER_URL=${serverUrl} stackmail inbox`,
+    `STACKMAIL_SERVER_URL=${serverUrl} stackmail compose`,
+    `STACKMAIL_SERVER_URL=${serverUrl} stackmail read <message-id>`,
   ].join('\n');
 }
 
