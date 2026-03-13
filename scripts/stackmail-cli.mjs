@@ -122,6 +122,12 @@ function clearScreen() {
   process.stdout.write('\x1Bc');
 }
 
+function keyMatches(key, ch, expected) {
+  const name = typeof key?.name === 'string' ? key.name.toLowerCase() : '';
+  const sequence = typeof ch === 'string' ? ch.toLowerCase() : '';
+  return name === expected || sequence === expected;
+}
+
 async function prompt(question, initial = '') {
   const rl = readlinePromises.createInterface({ input: process.stdin, output: process.stdout });
   try {
@@ -228,7 +234,7 @@ async function selectInboxMessage(ctx, messages, includeClaimed) {
   let selected = 0;
   renderInboxScreen(ctx, messages, selected, includeClaimed);
   return withRawMode(() => new Promise((resolve) => {
-    const onKeypress = async (_, key) => {
+    const onKeypress = async (ch, key) => {
       if (key.name === 'up') {
         selected = selected > 0 ? selected - 1 : Math.max(0, messages.length - 1);
         renderInboxScreen(ctx, messages, selected, includeClaimed);
@@ -244,27 +250,27 @@ async function selectInboxMessage(ctx, messages, includeClaimed) {
         resolve({ action: 'open', message: messages[selected] ?? null });
         return;
       }
-      if (key.name === 'r') {
+      if (keyMatches(key, ch, 'r')) {
         cleanup();
         resolve({ action: 'reply', message: messages[selected] ?? null });
         return;
       }
-      if (key.name === 'c') {
+      if (keyMatches(key, ch, 'c')) {
         cleanup();
         resolve({ action: 'compose', message: null });
         return;
       }
-      if (key.name === 'a') {
+      if (keyMatches(key, ch, 'a')) {
         cleanup();
         resolve({ action: 'toggle-claimed', message: null });
         return;
       }
-      if (key.name === 'j') {
+      if (keyMatches(key, ch, 'j')) {
         cleanup();
         resolve({ action: 'refresh', message: null });
         return;
       }
-      if (key.name === 'q' || (key.ctrl && key.name === 'c')) {
+      if (keyMatches(key, ch, 'q') || (key.ctrl && key.name === 'c')) {
         cleanup();
         resolve({ action: 'quit', message: null });
       }
@@ -287,13 +293,13 @@ async function renderMessageView(ctx, inboxEntry, message) {
 
   if (!process.stdin.isTTY || !process.stdout.isTTY) return 'back';
   return withRawMode(() => new Promise((resolve) => {
-    const onKeypress = (_, key) => {
-      if (key.name === 'r') {
+    const onKeypress = (ch, key) => {
+      if (keyMatches(key, ch, 'r')) {
         cleanup();
         resolve('reply');
         return;
       }
-      if (key.name === 'b' || key.name === 'escape' || key.name === 'q' || key.name === 'return' || (key.ctrl && key.name === 'c')) {
+      if (keyMatches(key, ch, 'b') || key.name === 'escape' || keyMatches(key, ch, 'q') || key.name === 'return' || (key.ctrl && key.name === 'c')) {
         cleanup();
         resolve('back');
       }
