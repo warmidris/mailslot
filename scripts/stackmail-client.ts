@@ -99,6 +99,24 @@ export interface ServerStatus {
   network?: string;
   chainId?: number;
   supportedToken?: string | null;
+  runtimeSettings?: {
+    maxBorrowPerTap?: string;
+  };
+}
+
+export interface PreparedLiquidityAction {
+  reservoirContract: string;
+  stackflowContract: string;
+  chainId: number;
+  token: string | null;
+  functionName: 'add-funds' | 'borrow-liquidity';
+  amount: string;
+  fee?: string;
+  myBalance: string;
+  reservoirBalance: string;
+  nonce: string;
+  mySignature: string;
+  reservoirSignature: string;
 }
 
 export interface ResolvedTapState {
@@ -736,6 +754,155 @@ export async function getTapState(
   const sfContract = resolveSfContract(status);
   const token = await resolveSupportedToken(status, reservoirContract, chainId);
   return queryOnChainTapState(kp.addr, reservoirContract, sfContract, token, chainId);
+}
+
+export async function prepareAddFunds(
+  privkeyHex: string,
+  amount: bigint,
+  serverUrl: string = DEFAULTS.SERVER_URL,
+): Promise<PreparedLiquidityAction> {
+  if (amount <= 0n) throw new Error('amount must be > 0');
+  const kp = keypairFromPrivkey(privkeyHex);
+  const status = await getServerStatus(serverUrl);
+  const tap = await getTapState(privkeyHex, serverUrl);
+  if (!tap) throw new Error('No tap found. Open a mailbox before adding funds.');
+
+  const nextMyBalance = tap.pipeState.myBalance + amount;
+  const nextReservoirBalance = tap.pipeState.serverBalance;
+  const nextNonce = tap.pipeState.nonce + 1n;
+  const pipeKey = canonicalPipeKey(tap.token, kp.addr, resolveReservoirContract(status));
+  const message = buildTransferMessage({
+    pipeKey,
+    forPrincipal: kp.addr,
+    myBalance: nextMyBalance.toString(),
+    theirBalance: nextReservoirBalance.toString(),
+    nonce: nextNonce.toString(),
+    action: '2',
+    actor: kp.addr,
+    hashedSecret: null,
+    validAfter: null,
+  });
+  const mySignature = await sip018Sign(tap.contractId, message, privkeyHex, resolveChainId(status));
+
+  const r = await http(
+    'POST',
+    `${serverUrl}/tap/add-funds-params`,
+    {
+      user: kp.addr,
+      token: tap.token,
+      amount: amount.toString(),
+      myBalance: nextMyBalance.toString(),
+      reservoirBalance: nextReservoirBalance.toString(),
+      nonce: nextNonce.toString(),
+      mySignature,
+    },
+  );
+  if (!r.ok) throw new Error(`prepareAddFunds failed: ${r.status} ${JSON.stringify(r.data)}`);
+  const data = r.data as { reservoirSignature?: string };
+  if (!data.reservoirSignature) throw new Error('prepareAddFunds: server returned no reservoir signature');
+  return {
+    reservoirContract: resolveReservoirContract(status),
+    stackflowContract: tap.contractId,
+    chainId: resolveChainId(status),
+    token: tap.token,
+    functionName: 'add-funds',
+    amount: amount.toString(),
+    myBalance: nextMyBalance.toString(),
+    reservoirBalance: nextReservoirBalance.toString(),
+    nonce: nextNonce.toString(),
+    mySignature,
+    reservoirSignature: data.reservoirSignature,
+  };
+}
+
+export async function prepareBorrowMoreLiquidity(
+  privkeyHex: string,
+  amount: bigint,
+  serverUrl: string = DEFAULTS.SERVER_URL,
+): Promise<PreparedLiquidityAction> {
+  if (amount <= 0n) throw new Error('amount must be > 0');
+  const kp = keypairFromPrivkey(privkeyHex);
+  const status = await getServerStatus(serverUrl);
+  const tap = await getTapState(privkeyHex, serverUrl);
+  if (!tap) throw new Error('No tap found. Open a mailbox before borrowing.');
+
+  const nextMyBalance = tap.pipeState.myBalance;
+  const nextReservoirBalance = tap.pipeState.serverBalance + amount;
+  const nextNonce = tap.pipeState.nonce + 1n;
+  const reservoir = resolveReservoirContract(status);
+  const pipeKey = canonicalPipeKey(tap.token, kp.addr, reservoir);
+  const message = buildTransferMessage({
+    pipeKey,
+    forPrincipal: kp.addr,
+    myBalance: nextMyBalance.toString(),
+    theirBalance: nextReservoirBalance.toString(),
+    nonce: nextNonce.toString(),
+    action: '2',
+    actor: reservoir,
+    hashedSecret: null,
+    validAfter: null,
+  });
+  const mySignature = await sip018Sign(tap.contractId, message, privkeyHex, resolveChainId(status));
+
+  const r = await http(
+    'POST',
+    `${serverUrl}/tap/borrow-more-params`,
+    {
+      borrower: kp.addr,
+      token: tap.token,
+      borrowAmount: amount.toString(),
+      myBalance: nextMyBalance.toString(),
+      reservoirBalance: nextReservoirBalance.toString(),
+      borrowNonce: nextNonce.toString(),
+      mySignature,
+    },
+  );
+  if (!r.ok) throw new Error(`prepareBorrowMoreLiquidity failed: ${r.status} ${JSON.stringify(r.data)}`);
+  const data = r.data as { reservoirSignature?: string; borrowFee?: string };
+  if (!data.reservoirSignature || !data.borrowFee) {
+    throw new Error('prepareBorrowMoreLiquidity: server returned incomplete borrow params');
+  }
+  return {
+    reservoirContract: reservoir,
+    stackflowContract: tap.contractId,
+    chainId: resolveChainId(status),
+    token: tap.token,
+    functionName: 'borrow-liquidity',
+    amount: amount.toString(),
+    fee: data.borrowFee,
+    myBalance: nextMyBalance.toString(),
+    reservoirBalance: nextReservoirBalance.toString(),
+    nonce: nextNonce.toString(),
+    mySignature,
+    reservoirSignature: data.reservoirSignature,
+  };
+}
+
+export async function syncTapState(
+  privkeyHex: string,
+  action: PreparedLiquidityAction,
+  serverUrl: string = DEFAULTS.SERVER_URL,
+): Promise<void> {
+  const kp = keypairFromPrivkey(privkeyHex);
+  const auth = buildAuthHeader(kp.privHex, kp.pubHex, kp.addr, 'get-inbox');
+  const actor = action.functionName === 'add-funds' ? kp.addr : action.reservoirContract;
+  const r = await http(
+    'POST',
+    `${serverUrl}/tap/sync-state`,
+    {
+      user: kp.addr,
+      token: action.token,
+      myBalance: action.myBalance,
+      reservoirBalance: action.reservoirBalance,
+      nonce: action.nonce,
+      action: '2',
+      actor,
+      mySignature: action.mySignature,
+      reservoirSignature: action.reservoirSignature,
+    },
+    { 'x-stackmail-auth': auth },
+  );
+  if (!r.ok) throw new Error(`syncTapState failed: ${r.status} ${JSON.stringify(r.data)}`);
 }
 
 // ─── Public Client API ────────────────────────────────────────────────────────

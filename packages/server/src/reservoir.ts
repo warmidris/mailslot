@@ -284,6 +284,64 @@ export class ReservoirService {
     };
   }
 
+  private async getCurrentOnChainTapSnapshot(counterparty: string, token: string | null): Promise<{
+    pipeId: string;
+    pipeKey: { 'principal-1': string; 'principal-2': string; token: string | null };
+    serverBalance: bigint;
+    counterpartyBalance: bigint;
+    nonce: bigint;
+    hasUnmaturedPending: boolean;
+  }> {
+    const principals = canonicalPipePrincipals(this.serverAddress, counterparty);
+    const pipeKey = {
+      'principal-1': principals['principal-1'],
+      'principal-2': principals['principal-2'],
+      token,
+    };
+    const pipeId = this.buildPipeId(this.contractId, pipeKey);
+    const onChainPipe = await this.getOnChainPipeState(counterparty, pipeKey);
+    if (!onChainPipe) {
+      throw new ReservoirError(404, `no tap found for ${counterparty}`, 'no-tap');
+    }
+
+    const currentBurnHeight = await fetchCurrentBurnBlockHeight(this.chainId);
+    const isPendingActive = (leg: PendingLeg | undefined): boolean => {
+      if (!leg || leg.amount <= 0n) return false;
+      if (currentBurnHeight != null && leg.burnHeight != null && currentBurnHeight >= leg.burnHeight) {
+        return false;
+      }
+      return true;
+    };
+
+    const serverIsPrincipal1 = pipeKey['principal-1'] === this.serverAddress;
+    const serverBalance = serverIsPrincipal1
+      ? onChainPipe.balance1 + onChainPipe.pending1
+      : onChainPipe.balance2 + onChainPipe.pending2;
+    const counterpartyBalance = serverIsPrincipal1
+      ? onChainPipe.balance2 + onChainPipe.pending2
+      : onChainPipe.balance1 + onChainPipe.pending1;
+
+    return {
+      pipeId,
+      pipeKey,
+      serverBalance,
+      counterpartyBalance,
+      nonce: onChainPipe.nonce,
+      hasUnmaturedPending: isPendingActive(onChainPipe.pendingLeg1) || isPendingActive(onChainPipe.pendingLeg2),
+    };
+  }
+
+  private assertNoOptimisticPendingStates(pipeId: string, enforceableNonce: bigint): void {
+    const latestPending = this.getLatestPendingPipeRow(pipeId);
+    if (latestPending && BigInt(latestPending.nonce) > enforceableNonce) {
+      throw new ReservoirError(
+        409,
+        'tap has outstanding off-chain message state; settle or cancel messages before changing liquidity',
+        'tap-has-pending-states',
+      );
+    }
+  }
+
   private initTables(): void {
     const db = this.assertDb();
     db.exec(`
@@ -1345,5 +1403,277 @@ export class ReservoirService {
       borrowFee: borrowFee.toString(),
       reservoirSignature,
     };
+  }
+
+  async createAddFundsParams(args: {
+    user: string;
+    token: string | null;
+    amount: string;
+    myBalance: string;
+    reservoirBalance: string;
+    nonce: string;
+    mySignature: string;
+  }): Promise<{ reservoirSignature: string }> {
+    if (!this.serverPrivateKey) {
+      throw new ReservoirError(503, 'reservoir signing key unavailable', 'reservoir-key-missing');
+    }
+    if (!this.contractId) {
+      throw new ReservoirError(503, 'stackflow contract not configured', 'stackflow-contract-missing');
+    }
+    if (!this.reservoirContractId) {
+      throw new ReservoirError(503, 'reservoir contract not configured', 'reservoir-contract-missing');
+    }
+
+    const token = args.token == null || args.token.trim() === '' ? null : args.token.trim();
+    if (token !== null && !isContractPrincipal(token)) {
+      throw new ReservoirError(400, 'token must be a contract principal or null', 'invalid-token');
+    }
+
+    let amount: bigint;
+    let myBalance: bigint;
+    let reservoirBalance: bigint;
+    let nonce: bigint;
+    try {
+      amount = BigInt(args.amount);
+      myBalance = BigInt(args.myBalance);
+      reservoirBalance = BigInt(args.reservoirBalance);
+      nonce = BigInt(args.nonce);
+    } catch {
+      throw new ReservoirError(400, 'invalid numeric argument in add-funds params', 'invalid-add-funds-params');
+    }
+    if (amount <= 0n) {
+      throw new ReservoirError(400, 'amount must be > 0', 'invalid-add-funds-amount');
+    }
+
+    const current = await this.getCurrentOnChainTapSnapshot(args.user, token);
+    this.assertNoOptimisticPendingStates(current.pipeId, current.nonce);
+    if (current.hasUnmaturedPending) {
+      throw new ReservoirError(
+        409,
+        'tap has an on-chain pending deposit that has not matured yet',
+        'tap-has-onchain-pending',
+      );
+    }
+    if (nonce !== current.nonce + 1n) {
+      throw new ReservoirError(400, `nonce must be ${current.nonce + 1n}`, 'invalid-add-funds-nonce');
+    }
+    if (myBalance !== current.counterpartyBalance + amount) {
+      throw new ReservoirError(400, 'myBalance must equal current balance plus deposit amount', 'invalid-my-balance');
+    }
+    if (reservoirBalance !== current.serverBalance) {
+      throw new ReservoirError(400, 'reservoirBalance must equal the current reservoir balance', 'invalid-reservoir-balance');
+    }
+
+    const userState: TransferState = {
+      pipeKey: current.pipeKey,
+      forPrincipal: args.user,
+      myBalance: myBalance.toString(),
+      theirBalance: reservoirBalance.toString(),
+      nonce: nonce.toString(),
+      action: '2',
+      actor: args.user,
+      hashedSecret: null,
+      validAfter: null,
+    };
+    const userSigOk = await sip018Verify(
+      this.contractId,
+      buildTransferMessage(userState),
+      args.mySignature,
+      args.user,
+      this.chainId,
+    );
+    if (!userSigOk) {
+      throw new ReservoirError(401, 'invalid depositor signature', 'invalid-depositor-signature');
+    }
+
+    const reservoirState: TransferState = {
+      pipeKey: current.pipeKey,
+      forPrincipal: this.reservoirContractId,
+      myBalance: reservoirBalance.toString(),
+      theirBalance: myBalance.toString(),
+      nonce: nonce.toString(),
+      action: '2',
+      actor: args.user,
+      hashedSecret: null,
+      validAfter: null,
+    };
+    const reservoirSignature = await sip018Sign(
+      this.contractId,
+      buildTransferMessage(reservoirState),
+      this.serverPrivateKey,
+      this.chainId,
+    );
+    return { reservoirSignature };
+  }
+
+  async createBorrowLiquidityParams(args: {
+    borrower: string;
+    token: string | null;
+    borrowAmount: string;
+    borrowFee?: string;
+    myBalance: string;
+    reservoirBalance: string;
+    borrowNonce: string;
+    mySignature: string;
+  }): Promise<{
+    borrowFee: string;
+    reservoirSignature: string;
+  }> {
+    if (!this.serverPrivateKey) {
+      throw new ReservoirError(503, 'reservoir signing key unavailable', 'reservoir-key-missing');
+    }
+    if (!this.contractId) {
+      throw new ReservoirError(503, 'stackflow contract not configured', 'stackflow-contract-missing');
+    }
+    if (!this.reservoirContractId) {
+      throw new ReservoirError(503, 'reservoir contract not configured', 'reservoir-contract-missing');
+    }
+
+    const token = args.token == null || args.token.trim() === '' ? null : args.token.trim();
+    if (token !== null && !isContractPrincipal(token)) {
+      throw new ReservoirError(400, 'token must be a contract principal or null', 'invalid-token');
+    }
+
+    let borrowAmount: bigint;
+    let myBalance: bigint;
+    let reservoirBalance: bigint;
+    let borrowNonce: bigint;
+    try {
+      borrowAmount = BigInt(args.borrowAmount);
+      myBalance = BigInt(args.myBalance);
+      reservoirBalance = BigInt(args.reservoirBalance);
+      borrowNonce = BigInt(args.borrowNonce);
+    } catch {
+      throw new ReservoirError(400, 'invalid numeric argument in borrow params', 'invalid-borrow-params');
+    }
+    if (borrowAmount <= 0n) {
+      throw new ReservoirError(400, 'borrowAmount must be > 0', 'invalid-borrow-amount');
+    }
+
+    const current = await this.getCurrentOnChainTapSnapshot(args.borrower, token);
+    this.assertNoOptimisticPendingStates(current.pipeId, current.nonce);
+    if (current.hasUnmaturedPending) {
+      throw new ReservoirError(
+        409,
+        'tap has an on-chain pending deposit that has not matured yet',
+        'tap-has-onchain-pending',
+      );
+    }
+    if (borrowNonce !== current.nonce + 1n) {
+      throw new ReservoirError(400, `borrowNonce must be ${current.nonce + 1n}`, 'invalid-borrow-nonce');
+    }
+    const settings = this.settings.get();
+    const maxBorrowPerTap = BigInt(settings.maxBorrowPerTap);
+    if (current.serverBalance + borrowAmount > maxBorrowPerTap) {
+      throw new ReservoirError(
+        400,
+        `borrow would exceed the reservoir offer cap for a single tap (${maxBorrowPerTap})`,
+        'borrow-cap-exceeded',
+      );
+    }
+    if (myBalance !== current.counterpartyBalance) {
+      throw new ReservoirError(400, 'myBalance must equal the current user balance', 'invalid-my-balance');
+    }
+    if (reservoirBalance !== current.serverBalance + borrowAmount) {
+      throw new ReservoirError(400, 'reservoirBalance must equal current reservoir balance plus borrow amount', 'invalid-reservoir-balance');
+    }
+
+    let providedBorrowFee: bigint | null = null;
+    if (args.borrowFee != null && args.borrowFee.trim() !== '') {
+      try {
+        providedBorrowFee = BigInt(args.borrowFee);
+      } catch {
+        throw new ReservoirError(400, 'borrowFee must be a valid integer', 'invalid-borrow-fee');
+      }
+    }
+    const borrowFee = await this.fetchBorrowFeeFromReservoir(borrowAmount);
+    if (providedBorrowFee != null && providedBorrowFee < borrowFee) {
+      throw new ReservoirError(400, 'borrowFee is lower than the reservoir minimum', 'invalid-borrow-fee');
+    }
+
+    const userState: TransferState = {
+      pipeKey: current.pipeKey,
+      forPrincipal: args.borrower,
+      myBalance: myBalance.toString(),
+      theirBalance: reservoirBalance.toString(),
+      nonce: borrowNonce.toString(),
+      action: '2',
+      actor: this.reservoirContractId,
+      hashedSecret: null,
+      validAfter: null,
+    };
+    const userSigOk = await sip018Verify(
+      this.contractId,
+      buildTransferMessage(userState),
+      args.mySignature,
+      args.borrower,
+      this.chainId,
+    );
+    if (!userSigOk) {
+      throw new ReservoirError(401, 'invalid borrower signature', 'invalid-borrower-signature');
+    }
+
+    const reservoirState: TransferState = {
+      pipeKey: current.pipeKey,
+      forPrincipal: this.reservoirContractId,
+      myBalance: reservoirBalance.toString(),
+      theirBalance: myBalance.toString(),
+      nonce: borrowNonce.toString(),
+      action: '2',
+      actor: this.reservoirContractId,
+      hashedSecret: null,
+      validAfter: null,
+    };
+    const reservoirSignature = await sip018Sign(
+      this.contractId,
+      buildTransferMessage(reservoirState),
+      this.serverPrivateKey,
+      this.chainId,
+    );
+    return {
+      borrowFee: borrowFee.toString(),
+      reservoirSignature,
+    };
+  }
+
+  async syncTapState(args: {
+    counterparty: string;
+    token: string | null;
+    userBalance: string;
+    reservoirBalance: string;
+    nonce: string;
+    action?: string | null;
+    actor?: string | null;
+    counterpartySignature?: string | null;
+    serverSignature?: string | null;
+  }): Promise<void> {
+    const token = args.token == null || args.token.trim() === '' ? null : args.token.trim();
+    if (token !== null && !isContractPrincipal(token)) {
+      throw new ReservoirError(400, 'token must be a contract principal or null', 'invalid-token');
+    }
+    const current = await this.getCurrentOnChainTapSnapshot(args.counterparty, token);
+    if (current.counterpartyBalance.toString() !== args.userBalance || current.serverBalance.toString() !== args.reservoirBalance) {
+      throw new ReservoirError(409, 'on-chain tap balances do not match the provided sync state yet', 'tap-sync-balance-mismatch');
+    }
+    if (current.nonce.toString() !== args.nonce) {
+      throw new ReservoirError(409, 'on-chain tap nonce does not match the provided sync state yet', 'tap-sync-nonce-mismatch');
+    }
+    this.upsertPipe(
+      current.pipeId,
+      this.contractId,
+      current.pipeKey,
+      args.reservoirBalance,
+      args.userBalance,
+      args.nonce,
+      {
+        action: args.action ?? null,
+        actor: args.actor ?? null,
+        hashedSecret: null,
+        validAfter: null,
+        serverSignature: args.serverSignature ?? null,
+        counterpartySignature: args.counterpartySignature ?? null,
+      },
+    );
+    this.deletePendingStatesAtOrBelowNonce(current.pipeId, args.nonce);
   }
 }

@@ -470,11 +470,25 @@
           <span class="step-num">2</span>
           <div>
             <strong style="color:var(--text)">Open a payment channel</strong><br>
-            This creates a StackFlow pipe between your wallet and the server, setting you up to send and receive Stackmail messages.
-            Think of it as opening your mailbox and buying stamps at the same time.
+            This creates a StackFlow pipe between your wallet and the server so you can send and receive Stackmail messages.
+            Your deposit gives you send capacity. The reservoir borrow gives you receive liquidity so incoming paid messages can be forwarded to you.
           </div>
         </li>
       </ul>
+
+      <div class="info-panel" style="margin-bottom:14px">
+        <div class="info-panel-row">
+          <span class="info-panel-label">Send capacity</span>
+          <span class="info-panel-value">Your side of the tap</span>
+        </div>
+        <div class="info-panel-row">
+          <span class="info-panel-label">Receive liquidity</span>
+          <span class="info-panel-value">Reservoir side of the tap</span>
+        </div>
+        <div style="margin-top:8px;font-size:12px;color:var(--muted);line-height:1.5">
+          Borrowing increases receive power, not your spendable balance.
+        </div>
+      </div>
 
       <div id="open-mailbox-error" style="margin-bottom:12px"></div>
 
@@ -638,6 +652,28 @@
         <hr class="divider">
         <div class="card-title">Channel Status</div>
         <div id="status-tap-info" style="font-size:13px;color:var(--muted)">Loading…</div>
+        <hr class="divider">
+        <div class="card-title">Manage Liquidity</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+          Add funds to increase your send capacity. Borrow liquidity to increase how much incoming value the reservoir can forward to you when others send mail. Borrowing does not increase your spendable balance.
+        </div>
+        <div class="grid-2">
+          <div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="add-funds-amount-input">Add Funds Amount</label>
+              <input type="text" id="add-funds-amount-input" placeholder="e.g. 10000" spellcheck="false" autocomplete="off" />
+            </div>
+            <button class="btn btn-secondary" id="add-funds-btn">Add Funds</button>
+          </div>
+          <div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="borrow-more-amount-input">Borrow Receive Liquidity</label>
+              <input type="text" id="borrow-more-amount-input" placeholder="e.g. 10000" spellcheck="false" autocomplete="off" />
+            </div>
+            <button class="btn btn-secondary" id="borrow-more-btn">Borrow More</button>
+          </div>
+        </div>
+        <div id="liquidity-status" style="margin-top:10px"></div>
 
         <div id="admin-section" style="display:none">
           <hr class="divider">
@@ -698,6 +734,10 @@
             <div class="form-group" style="margin-bottom:10px">
               <label for="admin-deferred-ttl-input">Deferred TTL (ms)</label>
               <input type="text" id="admin-deferred-ttl-input" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label for="admin-max-borrow-per-tap-input">Max Borrow / Tap</label>
+              <input type="text" id="admin-max-borrow-per-tap-input" spellcheck="false" autocomplete="off" />
             </div>
           </div>
           <button class="btn btn-secondary" id="admin-save-settings-btn">Save Stackmail Settings</button>

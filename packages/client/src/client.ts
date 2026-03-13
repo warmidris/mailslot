@@ -31,8 +31,10 @@ import type {
   PaymentInfo,
   PendingPayment,
   PollResult,
+  PreparedLiquidityAction,
   SendOptions,
   SendResult,
+  TapStateView,
 } from './types.js';
 
 export class StackmailError extends Error {
@@ -55,6 +57,165 @@ export class StackmailClient {
 
   constructor(config: ClientConfig) {
     this.config = config;
+  }
+
+  async getTapState(): Promise<TapStateView | null> {
+    const res = await fetch(`${this.config.serverUrl}/tap/state`, {
+      headers: await this.buildInboxHeaders('get-inbox'),
+      signal: AbortSignal.timeout(15_000),
+    });
+    this.captureInboxSession(res);
+    const data = await res.json().catch(() => ({})) as { tap?: TapStateView | null } & Record<string, unknown>;
+    if (!res.ok) throw new StackmailError(res.status, String(data['error'] ?? 'tap-state-failed'), data);
+    return data.tap ?? null;
+  }
+
+  async prepareAddFunds(amount: string): Promise<PreparedLiquidityAction> {
+    if (!this.config.sip018Signer) {
+      throw new StackmailError(400, 'sip018-signer-required', { operation: 'prepareAddFunds' });
+    }
+    const status = await this.fetchFullServerStatus(this.config.serverUrl);
+    const tap = await this.getTapState();
+    if (!tap) {
+      throw new StackmailError(404, 'no-tap', { operation: 'prepareAddFunds' });
+    }
+    const nextMyBalance = (BigInt(tap.myBalance) + BigInt(amount)).toString();
+    const nextReservoirBalance = tap.serverBalance;
+    const nextNonce = (BigInt(tap.nonce) + 1n).toString();
+    const pipeKey = this.canonicalPipeKey(tap.token, this.config.address, status.reservoirContract);
+    const mySignature = await this.config.sip018Signer({
+      contractId: status.sfContract,
+      forPrincipal: this.config.address,
+      myBalance: nextMyBalance,
+      theirBalance: nextReservoirBalance,
+      nonce: nextNonce,
+      action: '2',
+      actor: this.config.address,
+      token: tap.token,
+      principal1: pipeKey['principal-1'],
+      principal2: pipeKey['principal-2'],
+    });
+    const res = await fetch(`${this.config.serverUrl}/tap/add-funds-params`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        user: this.config.address,
+        token: tap.token,
+        amount,
+        myBalance: nextMyBalance,
+        reservoirBalance: nextReservoirBalance,
+        nonce: nextNonce,
+        mySignature,
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const data = await res.json().catch(() => ({})) as Record<string, unknown>;
+    if (!res.ok) throw new StackmailError(res.status, String(data['error'] ?? 'prepare-add-funds-failed'), data);
+    return {
+      reservoirContract: status.reservoirContract,
+      stackflowContract: status.sfContract,
+      chainId: status.chainId,
+      token: tap.token,
+      functionName: 'add-funds',
+      amount,
+      myBalance: nextMyBalance,
+      reservoirBalance: nextReservoirBalance,
+      nonce: nextNonce,
+      mySignature,
+      reservoirSignature: String(data['reservoirSignature'] ?? ''),
+    };
+  }
+
+  async prepareBorrowMoreLiquidity(amount: string): Promise<PreparedLiquidityAction> {
+    if (!this.config.sip018Signer) {
+      throw new StackmailError(400, 'sip018-signer-required', { operation: 'prepareBorrowMoreLiquidity' });
+    }
+    const status = await this.fetchFullServerStatus(this.config.serverUrl);
+    const tap = await this.getTapState();
+    if (!tap) {
+      throw new StackmailError(404, 'no-tap', { operation: 'prepareBorrowMoreLiquidity' });
+    }
+    const nextMyBalance = tap.myBalance;
+    const nextReservoirBalance = (BigInt(tap.serverBalance) + BigInt(amount)).toString();
+    const nextNonce = (BigInt(tap.nonce) + 1n).toString();
+    const reservoir = status.reservoirContract;
+    const pipeKey = this.canonicalPipeKey(tap.token, this.config.address, reservoir);
+    const mySignature = await this.config.sip018Signer({
+      contractId: status.sfContract,
+      forPrincipal: this.config.address,
+      myBalance: nextMyBalance,
+      theirBalance: nextReservoirBalance,
+      nonce: nextNonce,
+      action: '2',
+      actor: reservoir,
+      token: tap.token,
+      principal1: pipeKey['principal-1'],
+      principal2: pipeKey['principal-2'],
+    });
+    const res = await fetch(`${this.config.serverUrl}/tap/borrow-more-params`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        borrower: this.config.address,
+        token: tap.token,
+        borrowAmount: amount,
+        myBalance: nextMyBalance,
+        reservoirBalance: nextReservoirBalance,
+        borrowNonce: nextNonce,
+        mySignature,
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const data = await res.json().catch(() => ({})) as Record<string, unknown>;
+    if (!res.ok) throw new StackmailError(res.status, String(data['error'] ?? 'prepare-borrow-failed'), data);
+    return {
+      reservoirContract: status.reservoirContract,
+      stackflowContract: status.sfContract,
+      chainId: status.chainId,
+      token: tap.token,
+      functionName: 'borrow-liquidity',
+      amount,
+      fee: String(data['borrowFee'] ?? ''),
+      myBalance: nextMyBalance,
+      reservoirBalance: nextReservoirBalance,
+      nonce: nextNonce,
+      mySignature,
+      reservoirSignature: String(data['reservoirSignature'] ?? ''),
+    };
+  }
+
+  async syncTapState(args: {
+    token: string | null;
+    myBalance: string;
+    reservoirBalance: string;
+    nonce: string;
+    action: string;
+    actor: string;
+    mySignature: string;
+    reservoirSignature: string;
+  }): Promise<void> {
+    const res = await fetch(`${this.config.serverUrl}/tap/sync-state`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(await this.buildInboxHeaders('get-inbox')),
+      },
+      body: JSON.stringify({
+        user: this.config.address,
+        token: args.token,
+        myBalance: args.myBalance,
+        reservoirBalance: args.reservoirBalance,
+        nonce: args.nonce,
+        action: args.action,
+        actor: args.actor,
+        mySignature: args.mySignature,
+        reservoirSignature: args.reservoirSignature,
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    this.captureInboxSession(res);
+    const data = await res.json().catch(() => ({})) as Record<string, unknown>;
+    if (!res.ok) throw new StackmailError(res.status, String(data['error'] ?? 'tap-sync-failed'), data);
   }
 
   // ─── Send ─────────────────────────────────────────────────────────────────
@@ -317,6 +478,24 @@ export class StackmailClient {
     stackflowNodeUrl?: string;
     serverAddress: string;
   }> {
+    const full = await this.fetchFullServerStatus(serverUrl);
+    return {
+      messagePriceSats: full.messagePriceSats,
+      minFeeSats: full.minFeeSats,
+      stackflowNodeUrl: full.stackflowNodeUrl,
+      serverAddress: full.serverAddress,
+    };
+  }
+
+  private async fetchFullServerStatus(serverUrl: string): Promise<{
+    messagePriceSats: string;
+    minFeeSats: string;
+    stackflowNodeUrl?: string;
+    serverAddress: string;
+    reservoirContract: string;
+    sfContract: string;
+    chainId: number;
+  }> {
     const res = await fetch(`${serverUrl}/status`, { signal: AbortSignal.timeout(10_000) });
     const data = await res.json().catch(() => ({})) as Record<string, unknown>;
     if (!res.ok) throw new StackmailError(res.status, String(data['error'] ?? 'status-failed'), data);
@@ -325,7 +504,19 @@ export class StackmailClient {
       minFeeSats:       String(data['minFeeSats']       ?? '100'),
       stackflowNodeUrl: data['stackflowNodeUrl'] as string | undefined,
       serverAddress:    String(data['serverAddress'] ?? ''),
+      reservoirContract: String(data['reservoirContract'] ?? data['serverAddress'] ?? ''),
+      sfContract: String(data['sfContract'] ?? ''),
+      chainId: Number(data['chainId'] ?? this.config.chainId ?? 1),
     };
+  }
+
+  private canonicalPipeKey(token: string | null, a: string, b: string): { 'principal-1': string; 'principal-2': string; token: string | null } {
+    if (b.includes('.')) {
+      return { token, 'principal-1': a, 'principal-2': b };
+    }
+    return a < b
+      ? { token, 'principal-1': a, 'principal-2': b }
+      : { token, 'principal-1': b, 'principal-2': a };
   }
 
   private async buildAuthHeader(

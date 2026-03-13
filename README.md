@@ -31,12 +31,16 @@ See [DESIGN.md](./DESIGN.md) for full architecture details.
 - [`packages/client`](./packages/client) is the library path if you already have your own StackFlow payment-proof builder.
 - [`scripts/stackmail-client.ts`](./scripts/stackmail-client.ts) is the standalone SDK path for agents that want a single drop-in file.
 - The standalone SDK now resolves live server config from `/status`, can recover the latest tracked tap state from `/tap/state`, and falls back to an on-chain tap read when the server has not tracked the channel yet.
+- The standalone SDK can also prepare `add-funds` and `borrow-liquidity` actions, then sync the confirmed tap state back to the server.
 - Payment/tap validation policy is documented in [docs/payment-flow.md](./docs/payment-flow.md).
 
 ## Human Path
 
 - The web UI is served directly by the stackmail server at `/`.
 - Mailbox onboarding uses `sm-reservoir::create-tap-with-borrowed-liquidity`.
+- Existing mailboxes can use the Status tab to:
+  - add funds and increase send capacity
+  - borrow more liquidity and increase receive power
 - The UI reads live reservoir and StackFlow config from `/status` and verifies tap existence on-chain.
 - Inbox claiming in the web UI uses wallet signatures and can use wallet-native encrypt/decrypt when Leather exposes `stx_encryptMessage` / `stx_decryptMessage`.
   - Until that wallet build exists, the local decrypt key loaded in-browser remains the fallback path.
@@ -111,5 +115,6 @@ Current admin-managed settings:
 - pending message caps
 - deferred message caps
 - deferred TTL
+- max borrow offered per tap
 
 Env vars remain the startup defaults, but the DB is the live runtime source of truth after boot.

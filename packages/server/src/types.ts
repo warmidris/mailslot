@@ -145,6 +145,8 @@ export interface Config {
   maxDeferredGlobal: number;
   /** How long deferred sender-paid messages remain retryable */
   deferredMessageTtlMs: number;
+  /** Max additional receive liquidity the server will offer to a single tap */
+  maxBorrowPerTap: string;
   inboxSessionTtlMs: number;
 }
 
@@ -157,6 +159,7 @@ export interface RuntimeSettings {
   maxDeferredPerRecipient: number;
   maxDeferredGlobal: number;
   deferredMessageTtlMs: number;
+  maxBorrowPerTap: string;
 }
 
 export function runtimeSettingsFromConfig(config: Pick<
@@ -169,6 +172,7 @@ export function runtimeSettingsFromConfig(config: Pick<
   | 'maxDeferredPerRecipient'
   | 'maxDeferredGlobal'
   | 'deferredMessageTtlMs'
+  | 'maxBorrowPerTap'
 >): RuntimeSettings {
   return {
     messagePriceSats: config.messagePriceSats,
@@ -179,6 +183,7 @@ export function runtimeSettingsFromConfig(config: Pick<
     maxDeferredPerRecipient: config.maxDeferredPerRecipient,
     maxDeferredGlobal: config.maxDeferredGlobal,
     deferredMessageTtlMs: config.deferredMessageTtlMs,
+    maxBorrowPerTap: config.maxBorrowPerTap,
   };
 }
 
@@ -207,6 +212,7 @@ export function loadConfig(): Config {
     maxDeferredPerRecipient: parseInt(process.env.STACKMAIL_MAX_DEFERRED_PER_RECIPIENT ?? '20', 10),
     maxDeferredGlobal: parseInt(process.env.STACKMAIL_MAX_DEFERRED_GLOBAL ?? '200', 10),
     deferredMessageTtlMs: parseInt(process.env.STACKMAIL_DEFERRED_MESSAGE_TTL_MS ?? '86400000', 10),
+    maxBorrowPerTap: process.env.STACKMAIL_MAX_BORROW_PER_TAP ?? '100000',
     inboxSessionTtlMs: parseInt(process.env.STACKMAIL_INBOX_SESSION_TTL_MS ?? '300000', 10),
   };
 }

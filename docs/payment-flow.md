@@ -132,6 +132,32 @@ Using only settled balances makes mailbox onboarding and recent top-ups look bro
   - incoming liquidity / receive liquidity
 - If we later expose settled vs pending separately, the UI should make the distinction explicit instead of silently changing semantics.
 
+## Liquidity Management
+
+Users need two distinct tap-management actions:
+
+- `Add funds`
+  - on-chain call: `sm-reservoir::add-funds`
+  - effect: increases user-side tap balance
+  - user-facing result: more send capacity
+
+- `Borrow liquidity`
+  - on-chain call: `sm-reservoir::borrow-liquidity`
+  - effect: increases reservoir-side tap balance
+  - user-facing result: more receive liquidity
+
+Important product copy:
+
+- send capacity is what the user can spend toward the reservoir
+- receive liquidity is what the reservoir can forward to the user for incoming mail
+- borrowing improves receive power, not spendable balance
+
+Current UI policy:
+
+- both actions are blocked while there are outstanding optimistic off-chain states
+- both actions are blocked while there is an unmatured on-chain pending deposit
+- after the on-chain tx confirms, the browser syncs the new tap state back to the server so local tracking stays usable
+
 ## Abuse Limits
 
 Current shipped limits:
@@ -225,6 +251,7 @@ Current model:
 - env vars provide startup defaults
 - SQLite stores the live runtime values
 - only the reservoir deployer can update them through the admin UI
+- the reservoir can cap offered borrowed liquidity per tap
 
 ## Enforceable vs Optimistic State
 

@@ -88,6 +88,7 @@ STACKMAIL_MAX_DEFERRED_PER_SENDER=5
 STACKMAIL_MAX_DEFERRED_PER_RECIPIENT=20
 STACKMAIL_MAX_DEFERRED_GLOBAL=200
 STACKMAIL_DEFERRED_MESSAGE_TTL_MS=86400000
+STACKMAIL_MAX_BORROW_PER_TAP=100000
 ```
 
 Optional identity vars:
@@ -180,6 +181,7 @@ Current DB-backed runtime settings:
 - pending queue caps
 - deferred queue caps
 - deferred TTL
+- max borrow offered per tap
 
 Recommended operating model:
 

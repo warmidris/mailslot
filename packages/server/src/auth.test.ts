@@ -68,6 +68,7 @@ const testConfig: Config = {
   maxDeferredPerRecipient: 20,
   maxDeferredGlobal: 200,
   deferredMessageTtlMs: 86_400_000,
+  maxBorrowPerTap: '100000',
   inboxSessionTtlMs: 300_000,
 };
 

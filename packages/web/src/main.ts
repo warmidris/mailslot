@@ -169,7 +169,8 @@ function extractRuntimeSettings(status: Record<string, unknown>): RuntimeSetting
     value.maxDeferredPerSender == null ||
     value.maxDeferredPerRecipient == null ||
     value.maxDeferredGlobal == null ||
-    value.deferredMessageTtlMs == null
+    value.deferredMessageTtlMs == null ||
+    value.maxBorrowPerTap == null
   ) {
     return null;
   }
@@ -182,6 +183,7 @@ function extractRuntimeSettings(status: Record<string, unknown>): RuntimeSetting
     maxDeferredPerRecipient: Number(value.maxDeferredPerRecipient),
     maxDeferredGlobal: Number(value.maxDeferredGlobal),
     deferredMessageTtlMs: Number(value.deferredMessageTtlMs),
+    maxBorrowPerTap: String(value.maxBorrowPerTap),
   };
 }
 
@@ -195,6 +197,7 @@ function populateAdminSettingsForm(settings: RuntimeSettingsPayload | null): voi
   (document.getElementById('admin-max-deferred-recipient-input') as HTMLInputElement | null)!.value = String(settings.maxDeferredPerRecipient);
   (document.getElementById('admin-max-deferred-global-input') as HTMLInputElement | null)!.value = String(settings.maxDeferredGlobal);
   (document.getElementById('admin-deferred-ttl-input') as HTMLInputElement | null)!.value = String(settings.deferredMessageTtlMs);
+  (document.getElementById('admin-max-borrow-per-tap-input') as HTMLInputElement | null)!.value = settings.maxBorrowPerTap;
 }
 
 function hasSupportedTokenResolved(): boolean {
@@ -531,6 +534,7 @@ interface RuntimeSettingsPayload {
   maxDeferredPerRecipient: number;
   maxDeferredGlobal: number;
   deferredMessageTtlMs: number;
+  maxBorrowPerTap: string;
 }
 const DECRYPT_KEY_STORAGE_KEY = 'stackmail.inboxDecryptPrivateKey';
 
@@ -1002,6 +1006,11 @@ interface TrackedTapResponse {
   } | null;
 }
 
+interface LiquidityParamsResponse {
+  reservoirSignature?: string;
+  borrowFee?: string;
+}
+
 function cvPrincipalHex(addr: string): string {
   return bytesToHex(serializeCVBytes(principalCV(addr)));
 }
@@ -1198,6 +1207,326 @@ async function refreshCurrentTapState(): Promise<void> {
     pendingServerBalance: tap.pendingReservoirBalance,
   };
   updateIdentityUI();
+}
+
+async function addFundsToTap(): Promise<void> {
+  const btn = document.getElementById('add-funds-btn') as HTMLButtonElement;
+  const statusEl = document.getElementById('liquidity-status') as HTMLElement;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Adding…';
+  statusEl.innerHTML = '';
+
+  try {
+    if (!walletAddress) throw new Error('Wallet not connected');
+    await ensureSupportedTokenAssetNameLoaded();
+    const chainId = (serverStatus.chainId as number | undefined) ?? CHAIN_ID;
+    const sfContract = getRuntimeSfContract();
+    const reservoir = getRuntimeReservoirContract();
+    const supportedToken = getRuntimeSupportedToken();
+    const tokenAssetName = supportedToken == null ? null : getRuntimeSupportedTokenAssetName();
+    const amount = readPositiveAmountInput('add-funds-amount-input', 'Add funds amount');
+    const tap = await queryOnChainTap(walletAddress);
+    if (!tap) throw new Error('No on-chain tap found. Open your mailbox first.');
+    const nextMyBalance = tap.userBalance + amount;
+    const nextReservoirBalance = tap.reservoirBalance;
+    const nextNonce = tap.nonce + 1n;
+
+    statusEl.innerHTML = '<div class="alert alert-warning">Waiting for wallet signature (deposit state)…</div>';
+    const mySignature = await withTimeout(
+      sip018SignWithWallet(
+        sfContract,
+        buildTransferCV({
+          pipeKey: tap.pipeKey,
+          forPrincipal: walletAddress,
+          myBalance: nextMyBalance,
+          theirBalance: nextReservoirBalance,
+          nonce: nextNonce,
+          action: 2n,
+          actor: walletAddress,
+          hashedSecret: null,
+          validAfter: null,
+        }),
+        chainId,
+      ),
+      120_000,
+      'Timed out waiting for wallet signature. Open your wallet extension and approve the SIP-018 request.',
+    );
+
+    statusEl.innerHTML = '<div class="alert alert-warning">Preparing reservoir signature…</div>';
+    const paramsRes = await apiFetch('/tap/add-funds-params', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        user: walletAddress,
+        token: supportedToken,
+        amount: amount.toString(),
+        myBalance: nextMyBalance.toString(),
+        reservoirBalance: nextReservoirBalance.toString(),
+        nonce: nextNonce.toString(),
+        mySignature,
+      }),
+    });
+    const params = await paramsRes.json().catch(() => ({})) as LiquidityParamsResponse & { error?: string; message?: string };
+    if (!paramsRes.ok || !params.reservoirSignature) {
+      throw new Error(params.message || params.error || `Failed to prepare add-funds params (${paramsRes.status})`);
+    }
+
+    const tokenContractId = supportedToken as `${string}.${string}` | null;
+    const postConditions = supportedToken == null
+      ? [Pc.principal(walletAddress).willSendEq(amount).ustx()]
+      : [Pc.principal(walletAddress).willSendEq(amount).ft(tokenContractId!, tokenAssetName!)];
+
+    statusEl.innerHTML = '<div class="alert alert-warning">Waiting for wallet transaction approval…</div>';
+    const txId = await withTimeout(
+      new Promise<string>((resolve, reject) => {
+        openContractCall({
+          contractAddress: reservoir.split('.')[0],
+          contractName: reservoir.split('.')[1],
+          functionName: 'add-funds',
+          functionArgs: [
+            principalCV(sfContract),
+            uintCV(amount),
+            supportedToken == null ? noneCV() : someCV(principalCV(supportedToken)),
+            uintCV(nextMyBalance),
+            uintCV(nextReservoirBalance),
+            bufferCV(hexToBytes(mySignature)),
+            bufferCV(hexToBytes(params.reservoirSignature!)),
+            uintCV(nextNonce),
+          ],
+          network: chainIdToNetworkName(chainId),
+          postConditionMode: PostConditionMode.Deny,
+          postConditions,
+          appDetails: { name: 'Stackmail', icon: window.location.origin + '/favicon.ico' },
+          onFinish: (data: { txId?: string; txid?: string; tx_id?: string }) =>
+            resolve(data.txId ?? data.txid ?? data.tx_id ?? ''),
+          onCancel: () => reject(new Error('Transaction cancelled')),
+        });
+      }),
+      180_000,
+      'Timed out waiting for wallet transaction approval',
+    );
+    if (!txId) throw new Error('No transaction ID returned from wallet');
+
+    statusEl.innerHTML = `<div class="alert alert-warning">Transaction submitted. Waiting for confirmation…<br><a href="${escHtml(formatExplorerTxUrl(txId, chainId))}" target="_blank" rel="noopener" class="mono" style="color:inherit">${escHtml(txId)}</a></div>`;
+    await waitForStacksTx(txId, chainId, 'add funds');
+    await syncTapStateAfterOnChainAction({
+      token: supportedToken,
+      myBalance: nextMyBalance,
+      reservoirBalance: nextReservoirBalance,
+      nonce: nextNonce,
+      action: 2n,
+      actor: walletAddress,
+      mySignature,
+      reservoirSignature: params.reservoirSignature!,
+    });
+    await loadStatus();
+    statusEl.innerHTML = `<div class="alert alert-success">Funds added successfully.<br><a href="${escHtml(formatExplorerTxUrl(txId, chainId))}" target="_blank" rel="noopener" class="mono" style="color:inherit">${escHtml(txId)}</a></div>`;
+    (document.getElementById('add-funds-amount-input') as HTMLInputElement).value = '';
+  } catch (e) {
+    const msg = typeof e === 'string' ? e : ((e as Error)?.message || (e as { reason?: string })?.reason || JSON.stringify(e) || 'Unknown error');
+    statusEl.innerHTML = `<div class="alert alert-error">${escHtml(msg)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Add Funds';
+  }
+}
+
+async function borrowMoreLiquidity(): Promise<void> {
+  const btn = document.getElementById('borrow-more-btn') as HTMLButtonElement;
+  const statusEl = document.getElementById('liquidity-status') as HTMLElement;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Borrowing…';
+  statusEl.innerHTML = '';
+
+  try {
+    if (!walletAddress) throw new Error('Wallet not connected');
+    await ensureSupportedTokenAssetNameLoaded();
+    const chainId = (serverStatus.chainId as number | undefined) ?? CHAIN_ID;
+    const sfContract = getRuntimeSfContract();
+    const reservoir = getRuntimeReservoirContract();
+    const supportedToken = getRuntimeSupportedToken();
+    const tokenAssetName = supportedToken == null ? null : getRuntimeSupportedTokenAssetName();
+    const amount = readPositiveAmountInput('borrow-more-amount-input', 'Borrow amount');
+    const tap = await queryOnChainTap(walletAddress);
+    if (!tap) throw new Error('No on-chain tap found. Open your mailbox first.');
+    const nextMyBalance = tap.userBalance;
+    const nextReservoirBalance = tap.reservoirBalance + amount;
+    const nextNonce = tap.nonce + 1n;
+
+    statusEl.innerHTML = '<div class="alert alert-warning">Waiting for wallet signature (borrow state)…</div>';
+    const mySignature = await withTimeout(
+      sip018SignWithWallet(
+        sfContract,
+        buildTransferCV({
+          pipeKey: tap.pipeKey,
+          forPrincipal: walletAddress,
+          myBalance: nextMyBalance,
+          theirBalance: nextReservoirBalance,
+          nonce: nextNonce,
+          action: 2n,
+          actor: reservoir,
+          hashedSecret: null,
+          validAfter: null,
+        }),
+        chainId,
+      ),
+      120_000,
+      'Timed out waiting for wallet signature. Open your wallet extension and approve the SIP-018 request.',
+    );
+
+    statusEl.innerHTML = '<div class="alert alert-warning">Preparing borrow parameters…</div>';
+    const paramsRes = await apiFetch('/tap/borrow-more-params', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        borrower: walletAddress,
+        token: supportedToken,
+        borrowAmount: amount.toString(),
+        myBalance: nextMyBalance.toString(),
+        reservoirBalance: nextReservoirBalance.toString(),
+        borrowNonce: nextNonce.toString(),
+        mySignature,
+      }),
+    });
+    const params = await paramsRes.json().catch(() => ({})) as LiquidityParamsResponse & { error?: string; message?: string };
+    if (!paramsRes.ok || !params.reservoirSignature || !params.borrowFee) {
+      throw new Error(params.message || params.error || `Failed to prepare borrow params (${paramsRes.status})`);
+    }
+    const borrowFee = BigInt(params.borrowFee);
+
+    const tokenContractId = supportedToken as `${string}.${string}` | null;
+    const postConditions = supportedToken == null ? [
+      Pc.principal(walletAddress).willSendEq(borrowFee).ustx(),
+      Pc.principal(reservoir).willSendEq(amount).ustx(),
+    ] : [
+      Pc.principal(walletAddress).willSendEq(borrowFee).ft(tokenContractId!, tokenAssetName!),
+      Pc.principal(reservoir).willSendEq(amount).ft(tokenContractId!, tokenAssetName!),
+    ];
+
+    statusEl.innerHTML = `<div class="alert alert-warning">Waiting for wallet transaction approval…<br>Borrow fee: ${escHtml(formatPaymentAmount(borrowFee))}</div>`;
+    const txId = await withTimeout(
+      new Promise<string>((resolve, reject) => {
+        openContractCall({
+          contractAddress: reservoir.split('.')[0],
+          contractName: reservoir.split('.')[1],
+          functionName: 'borrow-liquidity',
+          functionArgs: [
+            principalCV(sfContract),
+            uintCV(amount),
+            uintCV(borrowFee),
+            supportedToken == null ? noneCV() : someCV(principalCV(supportedToken)),
+            uintCV(nextMyBalance),
+            uintCV(nextReservoirBalance),
+            bufferCV(hexToBytes(mySignature)),
+            bufferCV(hexToBytes(params.reservoirSignature!)),
+            uintCV(nextNonce),
+          ],
+          network: chainIdToNetworkName(chainId),
+          postConditionMode: PostConditionMode.Deny,
+          postConditions,
+          appDetails: { name: 'Stackmail', icon: window.location.origin + '/favicon.ico' },
+          onFinish: (data: { txId?: string; txid?: string; tx_id?: string }) =>
+            resolve(data.txId ?? data.txid ?? data.tx_id ?? ''),
+          onCancel: () => reject(new Error('Transaction cancelled')),
+        });
+      }),
+      180_000,
+      'Timed out waiting for wallet transaction approval',
+    );
+    if (!txId) throw new Error('No transaction ID returned from wallet');
+
+    statusEl.innerHTML = `<div class="alert alert-warning">Transaction submitted. Waiting for confirmation…<br><a href="${escHtml(formatExplorerTxUrl(txId, chainId))}" target="_blank" rel="noopener" class="mono" style="color:inherit">${escHtml(txId)}</a></div>`;
+    await waitForStacksTx(txId, chainId, 'borrow liquidity');
+    await syncTapStateAfterOnChainAction({
+      token: supportedToken,
+      myBalance: nextMyBalance,
+      reservoirBalance: nextReservoirBalance,
+      nonce: nextNonce,
+      action: 2n,
+      actor: reservoir,
+      mySignature,
+      reservoirSignature: params.reservoirSignature!,
+    });
+    await loadStatus();
+    statusEl.innerHTML = `<div class="alert alert-success">Receive liquidity increased successfully.<br><a href="${escHtml(formatExplorerTxUrl(txId, chainId))}" target="_blank" rel="noopener" class="mono" style="color:inherit">${escHtml(txId)}</a></div>`;
+    (document.getElementById('borrow-more-amount-input') as HTMLInputElement).value = '';
+  } catch (e) {
+    const msg = typeof e === 'string' ? e : ((e as Error)?.message || (e as { reason?: string })?.reason || JSON.stringify(e) || 'Unknown error');
+    statusEl.innerHTML = `<div class="alert alert-error">${escHtml(msg)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Borrow More';
+  }
+}
+
+function formatExplorerTxUrl(txId: string, chainId: number): string {
+  const chain = chainId === 1 ? 'mainnet' : 'testnet';
+  return `https://explorer.hiro.so/txid/${txId}?chain=${chain}`;
+}
+
+async function waitForStacksTx(txId: string, chainId: number, label: string): Promise<void> {
+  const base = chainIdToHiroApi(chainId);
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 180_000) {
+    const response = await fetch(`${base}/extended/v1/tx/0x${txId}`);
+    if (response.ok) {
+      const payload = await response.json() as { tx_status?: string };
+      const status = payload.tx_status ?? '';
+      if (status === 'success') return;
+      if (status.includes('abort') || status.includes('failed')) {
+        throw new Error(`${label} transaction failed (${status})`);
+      }
+    }
+    await new Promise(resolve => setTimeout(resolve, 4_000));
+  }
+  throw new Error(`Timed out waiting for ${label} transaction confirmation`);
+}
+
+function readPositiveAmountInput(id: string, label: string): bigint {
+  const raw = (document.getElementById(id) as HTMLInputElement).value.trim();
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${label} must be a positive integer amount`);
+  }
+  const amount = BigInt(raw);
+  if (amount <= 0n) {
+    throw new Error(`${label} must be greater than zero`);
+  }
+  return amount;
+}
+
+async function syncTapStateAfterOnChainAction(args: {
+  token: string | null;
+  myBalance: bigint;
+  reservoirBalance: bigint;
+  nonce: bigint;
+  action: bigint;
+  actor: string;
+  mySignature: string;
+  reservoirSignature: string;
+}): Promise<void> {
+  const response = await apiFetch('/tap/sync-state', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(await buildInboxRequestHeaders('get-inbox')),
+    },
+    body: JSON.stringify({
+      user: walletAddress,
+      token: args.token,
+      myBalance: args.myBalance.toString(),
+      reservoirBalance: args.reservoirBalance.toString(),
+      nonce: args.nonce.toString(),
+      action: args.action.toString(),
+      actor: args.actor,
+      mySignature: args.mySignature,
+      reservoirSignature: args.reservoirSignature,
+    }),
+  });
+  captureInboxSession(response);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({})) as { error?: string; message?: string };
+    throw new Error(error.message || error.error || `Tap sync failed (${response.status})`);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2045,8 +2374,12 @@ function updateIdentityUI(): void {
     const pendingServer = pipeBalanceBreakdown.pendingServerBalance;
     tapEl.innerHTML = `
       <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-bottom:8px">
-        Effective liquidity shown below includes pending channel balance when available.
+        Send capacity is the balance you can spend toward the reservoir. Receive liquidity is the reservoir balance it can forward to you when others send mail. Effective liquidity shown below includes pending channel balance when available.
       </div>
+      ${serverStatus.runtimeSettings && typeof (serverStatus.runtimeSettings as { maxBorrowPerTap?: unknown }).maxBorrowPerTap === 'string' ? `
+      <div style="font-size:11px;color:var(--muted);margin-top:2px;margin-bottom:8px">
+        Current receive-liquidity cap per tap: ${escHtml(formatPaymentAmount(String((serverStatus.runtimeSettings as { maxBorrowPerTap: string }).maxBorrowPerTap)))}
+      </div>` : ''}
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:4px">
         <div>
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:2px">Send capacity</div>
@@ -2244,6 +2577,7 @@ async function saveAdminRuntimeSettings(): Promise<void> {
       maxDeferredPerRecipient: readInt('admin-max-deferred-recipient-input', 'Max Deferred / Recipient'),
       maxDeferredGlobal: readInt('admin-max-deferred-global-input', 'Max Deferred / Global'),
       deferredMessageTtlMs: readInt('admin-deferred-ttl-input', 'Deferred TTL'),
+      maxBorrowPerTap: readUintString('admin-max-borrow-per-tap-input', 'Max Borrow / Tap'),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -2343,6 +2677,8 @@ document.getElementById('connect-wallet-main')!.addEventListener('click', connec
 document.getElementById('disconnect-btn')!.addEventListener('click', disconnectWallet);
 document.getElementById('open-mailbox-btn')!.addEventListener('click', openMailbox);
 document.getElementById('check-tap-btn')!.addEventListener('click', checkTapAfterTx);
+document.getElementById('add-funds-btn')!.addEventListener('click', addFundsToTap);
+document.getElementById('borrow-more-btn')!.addEventListener('click', borrowMoreLiquidity);
 
 document.querySelectorAll<HTMLButtonElement>('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => showTab(btn.dataset.tab ?? ''));

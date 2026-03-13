@@ -42,6 +42,25 @@ export interface IPaymentService {
     borrowFee: string;
     reservoirSignature: string;
   }>;
+  createAddFundsParams?(args: {
+    user: string;
+    token: string | null;
+    amount: string;
+    myBalance: string;
+    reservoirBalance: string;
+    nonce: string;
+    mySignature: string;
+  }): Promise<{ reservoirSignature: string }>;
+  createBorrowLiquidityParams?(args: {
+    borrower: string;
+    token: string | null;
+    borrowAmount: string;
+    borrowFee?: string;
+    myBalance: string;
+    reservoirBalance: string;
+    borrowNonce: string;
+    mySignature: string;
+  }): Promise<{ borrowFee: string; reservoirSignature: string }>;
   getTrackedTapState?(counterparty: string): Promise<{
     contractId: string;
     pipeKey: {
@@ -66,6 +85,17 @@ export interface IPaymentService {
     fee: string;
     recipientPendingPayment: PendingPayment | null;
   }): Promise<void>;
+  syncTapState?(args: {
+    counterparty: string;
+    token: string | null;
+    userBalance: string;
+    reservoirBalance: string;
+    nonce: string;
+    action?: string | null;
+    actor?: string | null;
+    counterpartySignature?: string | null;
+    serverSignature?: string | null;
+  }): Promise<void>;
 }
 import { verifyInboxAuth, verifyInboxSessionToken, issueInboxSessionToken, pubkeyToStxAddress, AuthError, AUTH_DOMAIN } from './auth.js';
 import { verifySecretHash } from '@stackmail/crypto';
@@ -84,6 +114,21 @@ export function createMailServer(
 
   function currentSettings(): RuntimeSettings {
     return settingsStore.get();
+  }
+
+  function respondTypedServiceError(res: ServerResponse, err: unknown): boolean {
+    if (
+      err instanceof PaymentError ||
+      (typeof err === 'object' &&
+        err != null &&
+        typeof (err as { statusCode?: unknown }).statusCode === 'number' &&
+        typeof (err as { reason?: unknown }).reason === 'string')
+    ) {
+      const typed = err as { statusCode: number; reason: string; message: string };
+      json(res, typed.statusCode, { error: typed.reason, message: typed.message });
+      return true;
+    }
+    return false;
   }
 
   function buildPaymentInfo(recipientAddr: string, recipientPublicKey: string) {
@@ -190,6 +235,7 @@ export function createMailServer(
     if (parsed['maxDeferredPerRecipient'] != null) patch.maxDeferredPerRecipient = Number(parsed['maxDeferredPerRecipient']);
     if (parsed['maxDeferredGlobal'] != null) patch.maxDeferredGlobal = Number(parsed['maxDeferredGlobal']);
     if (parsed['deferredMessageTtlMs'] != null) patch.deferredMessageTtlMs = Number(parsed['deferredMessageTtlMs']);
+    if (parsed['maxBorrowPerTap'] != null) patch.maxBorrowPerTap = String(parsed['maxBorrowPerTap']);
 
     try {
       const next = settingsStore.update(patch);
@@ -597,9 +643,178 @@ export function createMailServer(
         reservoirSignature: signed.reservoirSignature,
       });
     } catch (err) {
-      if (err instanceof PaymentError) {
-        return json(res, err.statusCode, { error: err.reason, message: err.message });
-      }
+      if (respondTypedServiceError(res, err)) return;
+      throw err;
+    }
+  }
+
+  async function handleTapAddFundsParams(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (typeof paymentService.createAddFundsParams !== 'function') {
+      return json(res, 503, { error: 'tap-liquidity-management-unavailable' });
+    }
+
+    let body: string;
+    try {
+      body = await readBody(req, 4096);
+    } catch {
+      return json(res, 413, { error: 'body-too-large' });
+    }
+
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      return json(res, 400, { error: 'invalid-json' });
+    }
+
+    const user = typeof data['user'] === 'string' ? data['user'] : '';
+    const tokenRaw = data['token'];
+    const token = typeof tokenRaw === 'string' ? tokenRaw.trim() : (tokenRaw == null ? null : '__invalid__');
+    const amount = String(data['amount'] ?? '');
+    const myBalance = String(data['myBalance'] ?? '');
+    const reservoirBalance = String(data['reservoirBalance'] ?? '');
+    const nonce = String(data['nonce'] ?? '');
+    const mySignature = typeof data['mySignature'] === 'string' ? data['mySignature'] : '';
+    if (token === '__invalid__' || !user || !amount || !myBalance || !reservoirBalance || !nonce || !mySignature) {
+      return json(res, 400, { error: 'invalid-params', message: 'missing required add-funds params' });
+    }
+
+    try {
+      const signed = await paymentService.createAddFundsParams({
+        user,
+        token: token || null,
+        amount,
+        myBalance,
+        reservoirBalance,
+        nonce,
+        mySignature,
+      });
+      return json(res, 200, {
+        ok: true,
+        amount,
+        nonce,
+        myBalance,
+        reservoirBalance,
+        reservoirSignature: signed.reservoirSignature,
+      });
+    } catch (err) {
+      if (respondTypedServiceError(res, err)) return;
+      throw err;
+    }
+  }
+
+  async function handleTapBorrowMoreParams(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (typeof paymentService.createBorrowLiquidityParams !== 'function') {
+      return json(res, 503, { error: 'tap-liquidity-management-unavailable' });
+    }
+
+    let body: string;
+    try {
+      body = await readBody(req, 4096);
+    } catch {
+      return json(res, 413, { error: 'body-too-large' });
+    }
+
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      return json(res, 400, { error: 'invalid-json' });
+    }
+
+    const borrower = typeof data['borrower'] === 'string' ? data['borrower'] : '';
+    const tokenRaw = data['token'];
+    const token = typeof tokenRaw === 'string' ? tokenRaw.trim() : (tokenRaw == null ? null : '__invalid__');
+    const borrowAmount = String(data['borrowAmount'] ?? '');
+    const borrowFeeRaw = data['borrowFee'];
+    const borrowFee = typeof borrowFeeRaw === 'string' ? borrowFeeRaw.trim() : '';
+    const myBalance = String(data['myBalance'] ?? '');
+    const reservoirBalance = String(data['reservoirBalance'] ?? '');
+    const borrowNonce = String(data['borrowNonce'] ?? '');
+    const mySignature = typeof data['mySignature'] === 'string' ? data['mySignature'] : '';
+    if (token === '__invalid__' || !borrower || !borrowAmount || !myBalance || !reservoirBalance || !borrowNonce || !mySignature) {
+      return json(res, 400, { error: 'invalid-params', message: 'missing required borrow-liquidity params' });
+    }
+
+    try {
+      const signed = await paymentService.createBorrowLiquidityParams({
+        borrower,
+        token: token || null,
+        borrowAmount,
+        borrowFee: borrowFee || undefined,
+        myBalance,
+        reservoirBalance,
+        borrowNonce,
+        mySignature,
+      });
+      return json(res, 200, {
+        ok: true,
+        borrowAmount,
+        borrowFee: signed.borrowFee,
+        myBalance,
+        reservoirBalance,
+        borrowNonce,
+        reservoirSignature: signed.reservoirSignature,
+      });
+    } catch (err) {
+      if (respondTypedServiceError(res, err)) return;
+      throw err;
+    }
+  }
+
+  async function handleTapSyncState(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (typeof paymentService.syncTapState !== 'function') {
+      return json(res, 503, { error: 'tap-liquidity-management-unavailable' });
+    }
+    const auth = await requireAuth(req, res, { action: 'get-inbox' });
+    if (!auth) return;
+
+    let body: string;
+    try {
+      body = await readBody(req, 4096);
+    } catch {
+      return json(res, 413, { error: 'body-too-large' });
+    }
+
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      return json(res, 400, { error: 'invalid-json' });
+    }
+
+    const user = typeof data['user'] === 'string' ? data['user'] : '';
+    if (!user || user !== auth.payload.address) {
+      return json(res, 403, { error: 'auth-address-mismatch', message: 'sync state address must match the authenticated wallet' });
+    }
+    const tokenRaw = data['token'];
+    const token = typeof tokenRaw === 'string' ? tokenRaw.trim() : (tokenRaw == null ? null : '__invalid__');
+    const myBalance = String(data['myBalance'] ?? '');
+    const reservoirBalance = String(data['reservoirBalance'] ?? '');
+    const nonce = String(data['nonce'] ?? '');
+    const action = data['action'] == null ? null : String(data['action']);
+    const actor = data['actor'] == null ? null : String(data['actor']);
+    const mySignature = data['mySignature'] == null ? null : String(data['mySignature']);
+    const reservoirSignature = data['reservoirSignature'] == null ? null : String(data['reservoirSignature']);
+    if (token === '__invalid__' || !myBalance || !reservoirBalance || !nonce) {
+      return json(res, 400, { error: 'invalid-params', message: 'missing required tap sync params' });
+    }
+
+    try {
+      await paymentService.syncTapState({
+        counterparty: user,
+        token: token || null,
+        userBalance: myBalance,
+        reservoirBalance,
+        nonce,
+        action,
+        actor,
+        counterpartySignature: mySignature,
+        serverSignature: reservoirSignature,
+      });
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      if (respondTypedServiceError(res, err)) return;
       throw err;
     }
   }
@@ -755,6 +970,18 @@ export function createMailServer(
 
     if (method === 'POST' && path === '/tap/borrow-params') {
       return handleTapBorrowParams(req, res);
+    }
+
+    if (method === 'POST' && path === '/tap/add-funds-params') {
+      return handleTapAddFundsParams(req, res);
+    }
+
+    if (method === 'POST' && path === '/tap/borrow-more-params') {
+      return handleTapBorrowMoreParams(req, res);
+    }
+
+    if (method === 'POST' && path === '/tap/sync-state') {
+      return handleTapSyncState(req, res);
     }
 
     return json(res, 404, { error: 'not-found' });

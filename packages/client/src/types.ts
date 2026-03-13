@@ -61,6 +61,20 @@ export interface PendingPayment {
   hashedSecret: string;
 }
 
+export interface TapStateView {
+  contractId: string;
+  token: string | null;
+  serverBalance: string;
+  myBalance: string;
+  sendCapacity: string;
+  receiveLiquidity: string;
+  settledServerBalance?: string;
+  settledMyBalance?: string;
+  pendingServerBalance?: string;
+  pendingMyBalance?: string;
+  nonce: string;
+}
+
 export interface ClaimProofRecord {
   messageId: string;
   paymentId: string;
@@ -99,6 +113,21 @@ export interface SendResult {
   deferredReason?: 'no-recipient-tap' | 'insufficient-recipient-liquidity';
 }
 
+export interface PreparedLiquidityAction {
+  reservoirContract: string;
+  stackflowContract: string;
+  chainId: number;
+  token: string | null;
+  functionName: 'add-funds' | 'borrow-liquidity';
+  amount: string;
+  fee?: string;
+  myBalance: string;
+  reservoirBalance: string;
+  nonce: string;
+  mySignature: string;
+  reservoirSignature: string;
+}
+
 export interface PollResult {
   inbox: InboxEntry[];
   claimed: DecryptedMessage[];
@@ -123,6 +152,22 @@ export interface ClientConfig {
    * Must return a compact 64-byte ECDSA signature (r||s) as hex.
    */
   signer: (message: string) => Promise<string>;
+  /**
+   * Sign a StackFlow SIP-018 transfer message for a state transition.
+   * Required for liquidity-management helpers.
+   */
+  sip018Signer?: (args: {
+    contractId: string;
+    forPrincipal: string;
+    myBalance: string;
+    theirBalance: string;
+    nonce: string;
+    action: '2';
+    actor: string;
+    token: string | null;
+    principal1: string;
+    principal2: string;
+  }) => Promise<string>;
   /**
    * Build an x402 payment proof for the StackFlow counterparty transfer endpoint.
    * Receives the hashedSecret (to embed in the state update) and payment parameters.

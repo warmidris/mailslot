@@ -44,6 +44,7 @@ function makeSettingsStore(db: import('better-sqlite3').Database) {
     maxDeferredPerRecipient: 20,
     maxDeferredGlobal: 200,
     deferredMessageTtlMs: 86_400_000,
+    maxBorrowPerTap: '100000',
   }));
 }
 
