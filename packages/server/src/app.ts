@@ -473,14 +473,37 @@ export function createMailServer(
       return json(res, 400, { error: 'encrypted-payload-required' });
     }
 
-    const enc = data.encryptedPayload as { v?: unknown; epk?: unknown; iv?: unknown; data?: unknown };
-    if (enc.v !== 1 || typeof enc.epk !== 'string' || typeof enc.iv !== 'string' || typeof enc.data !== 'string') {
-      return json(res, 400, { error: 'invalid-encrypted-payload', message: 'encryptedPayload must be EncryptedMail v1' });
+    const enc = data.encryptedPayload as {
+      iv?: unknown;
+      ephemeralPK?: unknown;
+      cipherText?: unknown;
+      mac?: unknown;
+      wasString?: unknown;
+      cipherTextEncoding?: unknown;
+    };
+    if (
+      typeof enc.iv !== 'string' ||
+      typeof enc.ephemeralPK !== 'string' ||
+      typeof enc.cipherText !== 'string' ||
+      typeof enc.mac !== 'string' ||
+      typeof enc.wasString !== 'boolean' ||
+      (enc.cipherTextEncoding != null && enc.cipherTextEncoding !== 'hex' && enc.cipherTextEncoding !== 'base64')
+    ) {
+      return json(res, 400, { error: 'invalid-encrypted-payload', message: 'encryptedPayload must be a Stacks ECIES cipher object' });
     }
 
-    const encryptedPayload = enc as { v: 1; epk: string; iv: string; data: string };
+    const encryptedPayload = enc as {
+      iv: string;
+      ephemeralPK: string;
+      cipherText: string;
+      mac: string;
+      wasString: boolean;
+      cipherTextEncoding?: 'hex' | 'base64';
+    };
 
-    const encSize = Buffer.byteLength(enc.data as string, 'hex') / 2;
+    const encSize = encryptedPayload.cipherTextEncoding === 'base64'
+      ? Buffer.from(encryptedPayload.cipherText, 'base64').byteLength
+      : Buffer.byteLength(encryptedPayload.cipherText, 'hex') / 2;
     if (encSize > config.maxEncryptedBytes) {
       return json(res, 413, { error: 'payload-too-large' });
     }

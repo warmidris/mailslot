@@ -179,12 +179,12 @@ async function run() {
   console.log('4. Alice generates HTLC secret and encrypts message for Bob...');
   const secretHex     = randomBytes(32).toString('hex');
   const hashedSecret  = hashSecret(secretHex);  // sha256(secret_bytes) hex, no 0x prefix
-  const encPayload    = encryptMail(
+  const encPayload    = await encryptMail(
     { v: 1, secret: secretHex, subject: 'Hello from Alice', body: 'First message via Stackmail reservoir model 🚀' },
     bobPubkey,
   );
   console.log('   ✓ hashedSecret:', hashedSecret.slice(0, 20) + '...');
-  console.log('   ✓ encryptedPayload.epk:', encPayload.epk.slice(0, 20) + '...\n');
+  console.log('   ✓ encryptedPayload.ephemeralPK:', encPayload.ephemeralPK.slice(0, 20) + '...\n');
 
   // ─── 5. Build SIP-018 payment proof ─────────────────────────────────────────
   console.log('5. Alice builds SIP-018 payment proof (Alice → Reservoir)...');
@@ -287,7 +287,7 @@ async function run() {
   console.log('   ✓ amount:', preview.data.amount);
 
   // Bob decrypts with his private key
-  const decrypted = decryptMail(preview.data.encryptedPayload, bob.privHex);
+  const decrypted = await decryptMail(preview.data.encryptedPayload, bob.privHex);
   assert(decrypted.v === 1, 'bad payload version');
   assert(decrypted.secret === secretHex, 'decrypted secret mismatch');
   assert(verifySecretHash(decrypted.secret, preview.data.hashedSecret), 'secret hash mismatch');

@@ -2,7 +2,7 @@
  * Stackmail TypeScript Client SDK
  *
  * Standalone client for the Stackmail mainnet deployment.
- * Copy this file into your project; it has no external deps beyond @noble/curves.
+ * Copy this file into your project; it depends on @noble/curves and @stacks/encryption.
  *
  * ─── Mainnet Deployment ────────────────────────────────────────────────────────
  *
@@ -41,8 +41,9 @@
  *   console.log(messages[0].body);
  */
 
-import { createHash, randomBytes, createECDH, createCipheriv, createDecipheriv, hkdfSync } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { secp256k1 } from '@noble/curves/secp256k1';
+import { decryptContent, encryptContent } from '@stacks/encryption';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -128,10 +129,12 @@ export interface ResolvedTapState {
 }
 
 export interface EncryptedMail {
-  v: 1;
-  epk: string;   // 33 bytes compressed pubkey hex
-  iv: string;    // 12 bytes hex
-  data: string;  // AES-256-GCM ciphertext + auth_tag hex
+  iv: string;
+  ephemeralPK: string;
+  cipherText: string;
+  mac: string;
+  wasString: boolean;
+  cipherTextEncoding?: 'hex' | 'base64';
 }
 
 export interface MailPayload {
@@ -496,50 +499,20 @@ async function sip018Sign(
 
 // ─── ECIES Encryption ─────────────────────────────────────────────────────────
 
-const HKDF_SALT = Buffer.from('stackmail-v1', 'utf-8');
-const HKDF_INFO = Buffer.from('encrypt', 'utf-8');
-
-function deriveKey(sharedSecret: Buffer): Buffer {
-  return Buffer.from(hkdfSync('sha256', sharedSecret, HKDF_SALT, HKDF_INFO, 32));
-}
-
 /** Encrypt a MailPayload for a recipient's compressed secp256k1 pubkey. */
-export function encryptMail(payload: MailPayload, recipientPubkeyHex: string): EncryptedMail {
-  const recipientPubkey = Buffer.from(recipientPubkeyHex, 'hex');
-  const ecdh = createECDH('secp256k1');
-  ecdh.generateKeys();
-  const epk = ecdh.getPublicKey(undefined, 'compressed') as Buffer;
-  const sharedSecret = ecdh.computeSecret(recipientPubkey);
-  const key = deriveKey(sharedSecret);
-  const iv = randomBytes(12);
-  const plaintext = Buffer.from(JSON.stringify(payload), 'utf-8');
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return {
-    v: 1,
-    epk: epk.toString('hex'),
-    iv: iv.toString('hex'),
-    data: Buffer.concat([ciphertext, authTag]).toString('hex'),
-  };
+export async function encryptMail(payload: MailPayload, recipientPubkeyHex: string): Promise<EncryptedMail> {
+  const content = await encryptContent(JSON.stringify(payload), {
+    publicKey: recipientPubkeyHex.replace(/^0x/i, ''),
+  });
+  return JSON.parse(content) as EncryptedMail;
 }
 
 /** Decrypt an EncryptedMail using the recipient's secp256k1 private key (32 bytes hex). */
-export function decryptMail(encrypted: EncryptedMail, privkeyHex: string): MailPayload {
-  const privkey = Buffer.from(privkeyHex, 'hex');
-  const epk = Buffer.from(encrypted.epk, 'hex');
-  const iv = Buffer.from(encrypted.iv, 'hex');
-  const combined = Buffer.from(encrypted.data, 'hex');
-  const ecdh = createECDH('secp256k1');
-  ecdh.setPrivateKey(privkey);
-  const sharedSecret = ecdh.computeSecret(epk);
-  const key = deriveKey(sharedSecret);
-  const ciphertext = combined.subarray(0, combined.length - 16);
-  const authTag = combined.subarray(combined.length - 16);
-  const decipher = createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAuthTag(authTag);
-  const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return JSON.parse(plaintext.toString('utf-8')) as MailPayload;
+export async function decryptMail(encrypted: EncryptedMail, privkeyHex: string): Promise<MailPayload> {
+  const plaintext = await decryptContent(JSON.stringify(encrypted), {
+    privateKey: privkeyHex.replace(/^0x/i, ''),
+  });
+  return JSON.parse(typeof plaintext === 'string' ? plaintext : Buffer.from(plaintext).toString('utf-8')) as MailPayload;
 }
 
 /** Compute the HTLC hash: SHA-256 of the secret bytes. */
@@ -1033,7 +1006,7 @@ export async function sendMessage({
   // 2. Generate HTLC secret and encrypt message body
   const secretHex = randomBytes(32).toString('hex');
   const hashedSecretHex = hashSecret(secretHex);
-  const encPayload = encryptMail({ v: 1, secret: secretHex, subject, body }, payInfo.recipientPublicKey);
+  const encPayload = await encryptMail({ v: 1, secret: secretHex, subject, body }, payInfo.recipientPublicKey);
 
   // 3. Compute new channel balances
   const currentPipeState = activeTap.pipeState;
@@ -1150,7 +1123,7 @@ export async function claimMessage(
   const preview = await previewMessage(messageId, privkeyHex, serverUrl);
 
   // Decrypt to get the HTLC secret + message content
-  const decrypted = decryptMail(preview.encryptedPayload, kp.privHex);
+  const decrypted = await decryptMail(preview.encryptedPayload, kp.privHex);
 
   // Verify the secret matches the payment commitment
   const computedHash = hashSecret(decrypted.secret);

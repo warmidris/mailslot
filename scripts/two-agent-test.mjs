@@ -257,7 +257,7 @@ async function sendMessage(senderKp, toAddr, subject, body, pipeState) {
 
   const secretHex       = randomBytes(32).toString('hex');
   const hashedSecretHex = hashSecret(secretHex);
-  const encPayload      = encryptMail(
+  const encPayload      = await encryptMail(
     { v: 1, secret: secretHex, subject, body },
     payInfo.recipientPublicKey,
   );
@@ -320,7 +320,7 @@ async function claimMessage(kp, messageId) {
   const prev = await api('GET', `/inbox/${messageId}/preview`, null, { 'x-stackmail-auth': auth1 });
   if (!prev.ok) throw new Error(`preview: ${prev.status} ${JSON.stringify(prev.data)}`);
 
-  const dec = decryptMail(prev.data.encryptedPayload, kp.privHex);
+  const dec = await decryptMail(prev.data.encryptedPayload, kp.privHex);
   const expected = prev.data.hashedSecret.replace(/^0x/, '');
   if (hashSecret(dec.secret) !== expected) throw new Error('secret hash mismatch');
 

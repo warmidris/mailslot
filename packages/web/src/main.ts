@@ -1,7 +1,9 @@
 import { secp256k1 } from '@noble/curves/secp256k1';
-import { gcm } from '@noble/ciphers/aes.js';
+import { cbc } from '@noble/ciphers/aes.js';
+import { hmac } from '@noble/hashes/hmac';
 import { sha256 } from '@noble/hashes/sha256';
-import { hkdf } from '@noble/hashes/hkdf';
+import { sha512 } from '@noble/hashes/sha512';
+import { concatBytes } from '@noble/hashes/utils';
 import {
   openContractCall,
   request as stacksRequest,
@@ -114,6 +116,14 @@ function extractDecryptedMessage(resp: unknown): string | null {
   return (
     (resp as { result?: { message?: string } })?.result?.message
     ?? (resp as { message?: string })?.message
+    ?? null
+  );
+}
+
+function extractDecryptedStackmailMessage(resp: unknown): Partial<DecryptedMailPayload> | null {
+  return (
+    (resp as { result?: { stackmailMessage?: Partial<DecryptedMailPayload> } })?.result?.stackmailMessage
+    ?? (resp as { stackmailMessage?: Partial<DecryptedMailPayload> })?.stackmailMessage
     ?? null
   );
 }
@@ -457,10 +467,12 @@ function cvToWalletJson(cv: ClarityValue): unknown {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface EncryptedMail {
-  v: 1;
-  epk: string;
   iv: string;
-  data: string;
+  ephemeralPK: string;
+  cipherText: string;
+  mac: string;
+  wasString: boolean;
+  cipherTextEncoding?: 'hex' | 'base64';
 }
 
 interface DecryptedMailPayload {
@@ -471,39 +483,49 @@ interface DecryptedMailPayload {
 }
 
 async function encryptMail(payload: unknown, recipientPubkeyHex: string): Promise<EncryptedMail> {
-  const eskBytes    = secp256k1.utils.randomPrivateKey();
-  const epkBytes    = secp256k1.getPublicKey(eskBytes, true);
-  const recipientPub = hexToBytes(recipientPubkeyHex.replace(/^0x/, ''));
-  const sharedFull  = secp256k1.getSharedSecret(eskBytes, recipientPub, true);
-  const sharedX     = sharedFull.slice(1);
-  const salt        = new TextEncoder().encode('stackmail-v1');
-  const info        = new TextEncoder().encode('encrypt');
-  const key         = hkdf(sha256, sharedX, salt, info, 32);
-  const iv          = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext   = new TextEncoder().encode(JSON.stringify(payload));
-  const encrypted   = gcm(new Uint8Array(key), iv).encrypt(plaintext);
-  return { v: 1, epk: bytesToHex(epkBytes), iv: bytesToHex(iv), data: bytesToHex(encrypted) };
+  const ephemeralPrivateKey = secp256k1.utils.randomPrivateKey();
+  const ephemeralPublicKey = secp256k1.getPublicKey(ephemeralPrivateKey, true);
+  const recipientPublicKey = hexToBytes(recipientPubkeyHex.replace(/^0x/i, ''));
+  const sharedSecret = secp256k1.getSharedSecret(ephemeralPrivateKey, recipientPublicKey, true).slice(1);
+  const keyMaterial = sha512(sharedSecret);
+  const encryptionKey = keyMaterial.slice(0, 32);
+  const hmacKey = keyMaterial.slice(32);
+  const iv = secp256k1.utils.randomPrivateKey().slice(0, 16);
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  const cipherText = cbc(encryptionKey, iv).encrypt(plaintext);
+  const mac = hmac(sha256, hmacKey, concatBytes(iv, ephemeralPublicKey, cipherText));
+  return {
+    iv: bytesToHex(iv),
+    ephemeralPK: bytesToHex(ephemeralPublicKey),
+    cipherText: bytesToHex(cipherText),
+    mac: bytesToHex(mac),
+    wasString: true,
+  };
 }
 
 async function decryptMail(payload: EncryptedMail, privateKeyHex: string): Promise<DecryptedMailPayload> {
-  if (payload.v !== 1) throw new Error('Unsupported encrypted payload version');
-  const privateKey = hexToBytes(privateKeyHex);
-  const epk = hexToBytes(payload.epk);
-  const sharedFull = secp256k1.getSharedSecret(privateKey, epk, true);
-  const sharedX = sharedFull.slice(1);
-  const salt = new TextEncoder().encode('stackmail-v1');
-  const info = new TextEncoder().encode('encrypt');
-  const key = hkdf(sha256, sharedX, salt, info, 32);
-  const ivRaw = hexToBytes(payload.iv);
-  const iv = new Uint8Array(ivRaw.length);
-  iv.set(ivRaw);
-  const ciphertextBytes = hexToBytes(payload.data);
-  const ciphertext = new Uint8Array(ciphertextBytes.length);
-  ciphertext.set(ciphertextBytes);
-  const plaintext = gcm(new Uint8Array(key), iv).decrypt(ciphertext);
+  const privateKey = hexToBytes(privateKeyHex.replace(/^0x/i, ''));
+  const ephemeralPK = hexToBytes(payload.ephemeralPK.replace(/^0x/i, ''));
+  const iv = hexToBytes(payload.iv.replace(/^0x/i, ''));
+  const cipherText =
+    payload.cipherTextEncoding === 'base64'
+      ? Uint8Array.from(atob(payload.cipherText), c => c.charCodeAt(0))
+      : hexToBytes(payload.cipherText.replace(/^0x/i, ''));
+  const expectedMac = hexToBytes(payload.mac.replace(/^0x/i, ''));
+
+  const sharedSecret = secp256k1.getSharedSecret(privateKey, ephemeralPK, true).slice(1);
+  const keyMaterial = sha512(sharedSecret);
+  const encryptionKey = keyMaterial.slice(0, 32);
+  const hmacKey = keyMaterial.slice(32);
+  const actualMac = hmac(sha256, hmacKey, concatBytes(iv, ephemeralPK, cipherText));
+  if (actualMac.length !== expectedMac.length || actualMac.some((byte, i) => byte !== expectedMac[i])) {
+    throw new Error('decryption failed: wrong key or corrupted ciphertext');
+  }
+
+  const plaintext = cbc(encryptionKey, iv).decrypt(cipherText);
   const parsed = JSON.parse(new TextDecoder().decode(plaintext)) as DecryptedMailPayload;
   if (!parsed || parsed.v !== 1 || typeof parsed.secret !== 'string' || typeof parsed.body !== 'string') {
-    throw new Error('Decrypted payload is not valid Stackmail v1 mail');
+    throw new Error('Decrypted payload is not valid Stackmail mail');
   }
   return parsed;
 }
@@ -597,6 +619,30 @@ function updateDecryptKeyStatus(kind: 'info' | 'success' | 'warning' | 'error', 
   statusEl.innerHTML = `<div class="alert ${cls}">${escHtml(message)}</div>`;
 }
 
+function updateDecryptCliHelp(): void {
+  const card = document.getElementById('decrypt-cli-help') as HTMLElement | null;
+  const commandsEl = document.getElementById('decrypt-cli-commands') as HTMLElement | null;
+  if (!card || !commandsEl) return;
+
+  const shouldShow = !walletCryptoAvailable;
+  card.style.display = shouldShow ? '' : 'none';
+  if (!shouldShow) return;
+
+  const serverUrl = window.location.origin;
+  commandsEl.textContent = [
+    'Install:',
+    'git clone https://github.com/warmidris/stackmail.git',
+    'cd stackmail',
+    'npm install',
+    'npm run build --workspace @stackmail/client',
+    '',
+    'Use:',
+    `node scripts/stackmail-cli.mjs inbox --server ${serverUrl} --private-key <your-private-key>`,
+    `node scripts/stackmail-cli.mjs claim --server ${serverUrl} --private-key <your-private-key> --message-id <message-id>`,
+    `node scripts/stackmail-cli.mjs poll --server ${serverUrl} --private-key <your-private-key>`,
+  ].join('\n');
+}
+
 function updateDecryptKeyUI(): void {
   updateBrowserDecryptFallbackVisibility();
   const input = document.getElementById('decrypt-key-input') as HTMLInputElement | null;
@@ -611,6 +657,7 @@ function updateDecryptKeyUI(): void {
     updateDecryptKeyStatus('info', walletCryptoAvailable
       ? 'Wallet-native decrypt is available.'
       : 'Browser private-key decrypt is disabled on this server.');
+    updateDecryptCliHelp();
     return;
   }
 
@@ -627,6 +674,7 @@ function updateDecryptKeyUI(): void {
     saveBtn.textContent = 'Load Decrypt Key';
     updateDecryptKeyStatus('info', 'Load the local decrypt key to claim and open encrypted messages in the browser.');
   }
+  updateDecryptCliHelp();
 }
 
 function saveDecryptKey(): void {
@@ -1895,6 +1943,10 @@ async function decryptMailWithWallet(payload: EncryptedMail): Promise<DecryptedM
   const provider = getLeatherProvider();
   if (!provider) throw new Error('Leather provider not available');
   const resp = await provider.request('stx_decryptMessage', { encryptedMessage: payload });
+  const parsed = extractDecryptedStackmailMessage(resp);
+  if (parsed && parsed.v === 1 && typeof parsed.secret === 'string' && typeof parsed.body === 'string') {
+    return parsed as DecryptedMailPayload;
+  }
   const message = extractDecryptedMessage(resp);
   if (!message) throw new Error('Wallet did not return decrypted plaintext');
   return parseWalletDecryptedMail(message);

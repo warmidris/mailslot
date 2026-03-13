@@ -17,7 +17,13 @@ function makeMessage(overrides: Partial<StoredMessage> = {}): StoredMessage {
     fee: '100',
     paymentId: 'pay-' + randomUUID(),
     hashedSecret: 'abc123hashedsecret',
-    encryptedPayload: { v: 1, epk: 'aa'.repeat(33), iv: 'bb'.repeat(12), data: 'cc'.repeat(48) },
+    encryptedPayload: {
+      iv: 'bb'.repeat(16),
+      ephemeralPK: '02' + 'aa'.repeat(32),
+      cipherText: 'cc'.repeat(48),
+      mac: 'dd'.repeat(32),
+      wasString: true,
+    },
     pendingPayment: { stateProof: { nonce: 1, sig: 'abc' }, amount: '900', hashedSecret: 'abc123hashedsecret' },
     deliveryState: 'ready',
     claimed: false,
@@ -74,7 +80,13 @@ describe('SqliteMessageStore', () => {
       const store = makeStore();
       await store.init();
       const msg = makeMessage({
-        encryptedPayload: { v: 1, epk: 'aabb'.repeat(8), iv: 'ccdd'.repeat(3), data: 'eeff'.repeat(24) },
+        encryptedPayload: {
+          iv: 'ccdd'.repeat(8),
+          ephemeralPK: '03' + 'aabb'.repeat(16),
+          cipherText: 'eeff'.repeat(24),
+          mac: '11'.repeat(32),
+          wasString: true,
+        },
       });
       await store.saveMessage(msg);
       const retrieved = await store.getMessage(msg.id, msg.to);

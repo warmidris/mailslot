@@ -245,7 +245,7 @@ export class StackmailClient {
     const hashedSecretHex = hashSecret(secretHex);
 
     // 3. Encrypt payload (secret + message) with recipient's pubkey
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, subject: opts.subject, body: opts.body },
       opts.recipientPublicKey,
     );
@@ -317,7 +317,7 @@ export class StackmailClient {
     const encryptedPayload = preview.encryptedPayload;
 
     // Decrypt to get R
-    const decrypted = decryptMail(encryptedPayload, this.config.privateKey);
+    const decrypted = await decryptMail(encryptedPayload, this.config.privateKey);
     const { secret: secretHex } = decrypted;
     const computedHash = hashSecret(secretHex);
     const pendingPayment = preview.pendingPayment;

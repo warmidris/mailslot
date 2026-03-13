@@ -11,6 +11,9 @@
     "test": "vitest run",
     "lint": "tsc --noEmit"
   },
+  "dependencies": {
+    "@stacks/encryption": "^7.0.2"
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0",

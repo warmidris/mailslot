@@ -168,7 +168,7 @@ async function sendMessage(senderKp, toAddr, subject, body, pipeState) {
   // 2. Generate HTLC secret and encrypt message
   const secretHex      = randomBytes(32).toString('hex');
   const hashedSecretHex = hashSecret(secretHex);
-  const encPayload     = encryptMail(
+  const encPayload     = await encryptMail(
     { v: 1, secret: secretHex, subject, body },
     payInfo.recipientPublicKey,
   );
@@ -240,7 +240,7 @@ async function claimMessage(kp, messageId) {
   if (!prev.ok) throw new Error(`preview failed: ${prev.status} ${JSON.stringify(prev.data)}`);
 
   // Decrypt
-  const dec = decryptMail(prev.data.encryptedPayload, kp.privHex);
+  const dec = await decryptMail(prev.data.encryptedPayload, kp.privHex);
 
   // Verify secret hash matches the payment commitment
   const expected = prev.data.hashedSecret.replace(/^0x/, '');

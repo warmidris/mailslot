@@ -120,7 +120,7 @@ describe('StackmailClient.claim', () => {
     // Create a real encrypted message so decryption actually works
     const secretHex = randomBytes(32).toString('hex');
     const hashedSecretHex = hashSecret(secretHex);
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, subject: 'Test', body: 'Hello claim test' },
       recipientPubkeyHex,
     );
@@ -172,7 +172,7 @@ describe('StackmailClient.claim', () => {
 
   it('does not reveal secret when preview hash does not match', async () => {
     const secretHex = randomBytes(32).toString('hex');
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, body: 'preview mismatch' },
       recipientPubkeyHex,
     );
@@ -191,7 +191,7 @@ describe('StackmailClient.claim', () => {
   it('persists claim proof via saveClaimProof hook', async () => {
     const secretHex = randomBytes(32).toString('hex');
     const hashedSecretHex = hashSecret(secretHex);
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, body: 'persist proof' },
       recipientPubkeyHex,
     );
@@ -227,7 +227,7 @@ describe('StackmailClient.claim', () => {
 
   it('throws StackmailError if server rejects the claim', async () => {
     const secretHex = randomBytes(32).toString('hex');
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, body: 'test' },
       recipientPubkeyHex,
     );
@@ -250,7 +250,7 @@ describe('StackmailClient.claim', () => {
 describe('StackmailClient.poll', () => {
   it('claims all unclaimed messages and returns results', async () => {
     const secretHex = randomBytes(32).toString('hex');
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, body: 'Poll test message' },
       recipientPubkeyHex,
     );

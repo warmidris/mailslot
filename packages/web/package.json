@@ -14,6 +14,7 @@
     "@noble/curves": "^1.4.0",
     "@noble/hashes": "^1.4.0",
     "@stacks/connect": "^8.2.5",
+    "@stacks/encryption": "^7.0.2",
     "@stacks/transactions": "^7.3.1"
   },
   "devDependencies": {

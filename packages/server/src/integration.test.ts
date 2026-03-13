@@ -452,7 +452,7 @@ describe('recipient public key registration', () => {
     const senderAddress = pubkeyToStxAddress(senderPubkeyHex);
     const secretHex = randomBytes(32).toString('hex');
     const hashedSecretHex = hashSecret(secretHex);
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, body: 'Reply path registration test' },
       recipientEncryptPubkeyHex,
     );
@@ -510,7 +510,7 @@ describe('full send → inbox → preview → claim flow', () => {
     // Sender already has recipient's pubkey (looked up from blockchain, not server)
     const secretHex = randomBytes(32).toString('hex');
     const hashedSecretHex = hashSecret(secretHex);
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, subject: 'Integration test', body: 'Hello from integration test' },
       recipientEncryptPubkeyHex,
     );
@@ -572,9 +572,16 @@ describe('full send → inbox → preview → claim flow', () => {
     expect(body.encryptedPayload).toBeDefined();
     const stored = await store.getMessage(messageId, recipientAddress);
     expect(stored?.deliveryState).toBe('previewed');
-    const enc = body.encryptedPayload as { v: number; epk: string; iv: string; data: string };
-    expect(enc.v).toBe(1);
-    expect(typeof enc.epk).toBe('string');
+    const enc = body.encryptedPayload as {
+      iv: string;
+      ephemeralPK: string;
+      cipherText: string;
+      mac: string;
+      wasString: boolean;
+    };
+    expect(typeof enc.ephemeralPK).toBe('string');
+    expect(typeof enc.iv).toBe('string');
+    expect(typeof enc.cipherText).toBe('string');
   });
 
   it('step 5: POST /inbox/:id/claim with wrong secret returns 400', async () => {
@@ -597,9 +604,11 @@ describe('full send → inbox → preview → claim flow', () => {
     });
     expect(previewRes.status).toBe(200);
     inboxSessionToken = previewRes.headers.get('x-stackmail-session') ?? inboxSessionToken;
-    const preview = await previewRes.json() as { encryptedPayload: { v: 1; epk: string; iv: string; data: string } };
+    const preview = await previewRes.json() as {
+      encryptedPayload: { iv: string; ephemeralPK: string; cipherText: string; mac: string; wasString: boolean };
+    };
 
-    const decrypted = decryptMail(preview.encryptedPayload, recipientEncryptPrivkeyHex);
+    const decrypted = await decryptMail(preview.encryptedPayload, recipientEncryptPrivkeyHex);
     expect(decrypted.subject).toBe('Integration test');
     expect(decrypted.body).toBe('Hello from integration test');
     const secretHex = decrypted.secret;
@@ -644,7 +653,7 @@ describe('recipient tap requirement', () => {
     paymentService.outgoingPaymentEnabled = false;
     const secretHex = randomBytes(32).toString('hex');
     const hashedSecretHex = hashSecret(secretHex);
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, body: 'Should fail without recipient tap' },
       recipientEncryptPubkeyHex,
     );
@@ -764,7 +773,7 @@ describe('sender identity binding', () => {
   it('rejects send when body.from does not match payment sender identity', async () => {
     const secretHex = randomBytes(32).toString('hex');
     const hashedSecretHex = hashSecret(secretHex);
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, subject: 'Integration test', body: 'Spoofed sender attempt' },
       recipientEncryptPubkeyHex,
     );
@@ -809,7 +818,7 @@ describe('claim finalization', () => {
 
     const secretHex = randomBytes(32).toString('hex');
     const hashedSecretHex = hashSecret(secretHex);
-    const encryptedPayload = encryptMail(
+    const encryptedPayload = await encryptMail(
       { v: 1, secret: secretHex, subject: 'Finalize test', body: 'mark settled on claim' },
       recipientEncryptPubkeyHex,
     );
@@ -881,7 +890,7 @@ describe('sender cancel', () => {
     const sendMessage = async (bodyText: string) => {
       const secretHex = randomBytes(32).toString('hex');
       const hashedSecretHex = hashSecret(secretHex);
-      const encryptedPayload = encryptMail(
+      const encryptedPayload = await encryptMail(
         { v: 1, secret: secretHex, body: bodyText },
         recipientEncryptPubkeyHex,
       );
@@ -990,7 +999,7 @@ describe('per-sender HTLC cap', () => {
     const sendMsg = async () => {
       const secretHex = randomBytes(32).toString('hex');
       const hashedSecretHex = hashSecret(secretHex);
-      const enc = encryptMail({ v: 1, secret: secretHex, body: 'hi' }, recipientEncryptPubkeyHex);
+      const enc = await encryptMail({ v: 1, secret: secretHex, body: 'hi' }, recipientEncryptPubkeyHex);
       const proof = JSON.stringify({ hashedSecret: hashedSecretHex, forPrincipal: 'SP_SENDER', amount: '1000' });
       return fetch(`${capUrl}/messages/${capRecipient}`, {
         method: 'POST',
@@ -1029,7 +1038,7 @@ describe('per-sender HTLC cap', () => {
     const sendMsg = async (sender: string) => {
       const secretHex = randomBytes(32).toString('hex');
       const hashedSecretHex = hashSecret(secretHex);
-      const enc = encryptMail({ v: 1, secret: secretHex, body: `hi from ${sender}` }, recipientEncryptPubkeyHex);
+      const enc = await encryptMail({ v: 1, secret: secretHex, body: `hi from ${sender}` }, recipientEncryptPubkeyHex);
       const proof = JSON.stringify({ hashedSecret: hashedSecretHex, forPrincipal: sender, amount: '1000' });
       return fetch(`${capUrl}/messages/${capRecipient}`, {
         method: 'POST',

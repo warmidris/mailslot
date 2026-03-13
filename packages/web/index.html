@@ -550,6 +550,14 @@
         <div id="decrypt-key-status" style="margin-top:12px"></div>
       </div>
 
+      <div class="card" id="decrypt-cli-help" style="margin-bottom:16px;display:none">
+        <div class="card-title">CLI Decrypt Fallback</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5">
+          If your wallet does not support Stackmail decrypt yet, use the local CLI to inspect your inbox and claim messages outside the browser.
+        </div>
+        <pre id="decrypt-cli-commands" style="margin:0;white-space:pre-wrap;font-size:12px;line-height:1.5;color:var(--text);background:rgba(255,255,255,0.03);padding:12px;border-radius:10px;overflow:auto"></pre>
+      </div>
+
       <div class="row" style="margin-bottom:16px">
         <button class="btn btn-secondary" id="refresh-inbox-btn">⟳ Refresh</button>
         <label style="margin:0;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
