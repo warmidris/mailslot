@@ -20,6 +20,8 @@ type ServerIdentitySource = 'env' | 'db' | 'generated';
 function normalizePrivateKeyHex(value: string): string | null {
   const normalized = value.trim().replace(/^0x/, '').toLowerCase();
   if (!normalized) return null;
+  // Accept 64-char (32-byte) keys or 66-char (32-byte + 01 compression flag) keys.
+  if (/^[0-9a-f]{66}$/.test(normalized)) return normalized.slice(0, 64);
   return /^[0-9a-f]{64}$/.test(normalized) ? normalized : null;
 }
 

@@ -1,45 +1,52 @@
-app = "mailslot"
-primary_region = "ord"
+# fly.toml app configuration file generated for mailslot on 2026-03-14T15:44:17-04:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'mailslot'
+primary_region = 'ord'
 
 [build]
 
 [env]
-  MAILSLOT_HOST = "0.0.0.0"
-  MAILSLOT_PORT = "8800"
-  MAILSLOT_DB_FILE = "/data/mailslot.db"
-  MAILSLOT_STACKS_NETWORK = "mainnet"
-  MAILSLOT_AUTH_AUDIENCE = "https://mailslot.locker"
-  MAILSLOT_ALLOWED_ORIGINS = "https://mailslot.locker"
-  MAILSLOT_MESSAGE_PRICE_SATS = "100"
-  MAILSLOT_MIN_FEE_SATS = "10"
-  MAILSLOT_MAX_PENDING_PER_SENDER = "10"
-  MAILSLOT_MAX_PENDING_PER_RECIPIENT = "20"
-  MAILSLOT_MAX_DEFERRED_PER_SENDER = "10"
-  MAILSLOT_MAX_DEFERRED_PER_RECIPIENT = "20"
-  MAILSLOT_MAX_DEFERRED_GLOBAL = "200"
-  MAILSLOT_DEFERRED_MESSAGE_TTL_MS = "86400000"
-  MAILSLOT_MAX_BORROW_PER_TAP = "5000"
-  MAILSLOT_RECEIVE_CAPACITY_MULTIPLIER = "20"
-  MAILSLOT_REFRESH_CAPACITY_COOLDOWN_MS = "86400000"
+  MAILSLOT_ALLOWED_ORIGINS = 'https://mailslot.locker'
+  MAILSLOT_AUTH_AUDIENCE = 'https://mailslot.locker'
+  MAILSLOT_DB_FILE = '/data/mailslot.db'
+  MAILSLOT_DEFERRED_MESSAGE_TTL_MS = '86400000'
+  MAILSLOT_HOST = '0.0.0.0'
+  MAILSLOT_MAX_BORROW_PER_TAP = '5000'
+  MAILSLOT_MAX_DEFERRED_GLOBAL = '200'
+  MAILSLOT_MAX_DEFERRED_PER_RECIPIENT = '20'
+  MAILSLOT_MAX_DEFERRED_PER_SENDER = '10'
+  MAILSLOT_MAX_PENDING_PER_RECIPIENT = '20'
+  MAILSLOT_MAX_PENDING_PER_SENDER = '10'
+  MAILSLOT_MESSAGE_PRICE_SATS = '100'
+  MAILSLOT_MIN_FEE_SATS = '10'
+  MAILSLOT_PORT = '8800'
+  MAILSLOT_RECEIVE_CAPACITY_MULTIPLIER = '20'
+  MAILSLOT_REFRESH_CAPACITY_COOLDOWN_MS = '86400000'
+  MAILSLOT_RESERVOIR_CONTRACT_ID = 'SP3HHD6N7SXNYF37GWT05DP51WVT8PRK0QYZQXW37.mailslot-reservoir'
+  MAILSLOT_SF_CONTRACT_ID = 'SP126XFZQ3ZHYM6Q6KAQZMMJSDY91A8BTT6AD08RV.stackflow-sbtc-0-6-0'
+  MAILSLOT_STACKS_NETWORK = 'mainnet'
 
 [[mounts]]
-  source = "mailslot_data"
-  destination = "/data"
+  source = 'data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8800
   force_https = true
-  auto_stop_machines = "off"
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
 
   [[http_service.checks]]
-    grace_period = "5s"
-    interval = "30s"
-    method = "GET"
-    path = "/health"
-    timeout = "5s"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '5s'
+    method = 'GET'
+    path = '/health'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'

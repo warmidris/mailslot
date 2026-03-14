@@ -20,63 +20,63 @@ describe('encryptMail / decryptMail', () => {
       subject: 'Test subject',
       body: 'Hello, world!',
     };
-    return expect(encryptMail(payload, pubkeyHex).then(enc => decryptMail(enc, privkeyHex))).resolves.toEqual(payload);
+    expect(decryptMail(encryptMail(payload, pubkeyHex), privkeyHex)).toEqual(payload);
   });
 
   it('round-trips a payload without subject', () => {
     const { privkeyHex, pubkeyHex } = generateTestKeypair();
     const payload: MailPayload = { v: 1, secret: 'a'.repeat(64), body: 'body only' };
-    return expect(encryptMail(payload, pubkeyHex).then(enc => decryptMail(enc, privkeyHex))).resolves.toEqual(payload);
+    expect(decryptMail(encryptMail(payload, pubkeyHex), privkeyHex)).toEqual(payload);
   });
 
-  it('produces different ciphertext each time (random IV + ephemeral key)', async () => {
+  it('produces different ciphertext each time (random IV + ephemeral key)', () => {
     const { pubkeyHex } = generateTestKeypair();
     const payload: MailPayload = { v: 1, secret: 'a'.repeat(64), body: 'same message' };
-    const enc1 = await encryptMail(payload, pubkeyHex);
-    const enc2 = await encryptMail(payload, pubkeyHex);
+    const enc1 = encryptMail(payload, pubkeyHex);
+    const enc2 = encryptMail(payload, pubkeyHex);
     expect(enc1.iv).not.toBe(enc2.iv);
-    expect(enc1.ephemeralPK).not.toBe(enc2.ephemeralPK);
-    expect(enc1.cipherText).not.toBe(enc2.cipherText);
+    expect(enc1.epk).not.toBe(enc2.epk);
+    expect(enc1.data).not.toBe(enc2.data);
   });
 
-  it('rejects decryption with wrong private key', async () => {
+  it('rejects decryption with wrong private key', () => {
     const { pubkeyHex } = generateTestKeypair();
     const { privkeyHex: wrongPrivkey } = generateTestKeypair();
     const payload: MailPayload = { v: 1, secret: 'a'.repeat(64), body: 'secret' };
-    await expect(encryptMail(payload, pubkeyHex).then(enc => decryptMail(enc, wrongPrivkey))).rejects.toThrow();
+    expect(() => decryptMail(encryptMail(payload, pubkeyHex), wrongPrivkey)).toThrow();
   });
 
-  it('rejects corrupted ciphertext', async () => {
+  it('rejects corrupted ciphertext', () => {
     const { privkeyHex, pubkeyHex } = generateTestKeypair();
     const payload: MailPayload = { v: 1, secret: 'a'.repeat(64), body: 'data' };
-    const encrypted = await encryptMail(payload, pubkeyHex);
-    const dataBytes = Buffer.from(encrypted.cipherText, 'hex');
+    const encrypted = encryptMail(payload, pubkeyHex);
+    const dataBytes = Buffer.from(encrypted.data, 'hex');
     dataBytes[10] ^= 0xff;
-    await expect(
-      decryptMail({ ...encrypted, cipherText: dataBytes.toString('hex') }, privkeyHex)
-    ).rejects.toThrow();
+    expect(() =>
+      decryptMail({ ...encrypted, data: dataBytes.toString('hex') }, privkeyHex)
+    ).toThrow();
   });
 
   it('accepts pubkey with 0x prefix', () => {
     const { privkeyHex, pubkeyHex } = generateTestKeypair();
     const payload: MailPayload = { v: 1, secret: 'a'.repeat(64), body: 'test' };
-    return expect(encryptMail(payload, '0x' + pubkeyHex).then(enc => decryptMail(enc, privkeyHex))).resolves.toEqual(payload);
+    expect(decryptMail(encryptMail(payload, '0x' + pubkeyHex), privkeyHex)).toEqual(payload);
   });
 
   it('accepts privkey with 0x prefix', () => {
     const { privkeyHex, pubkeyHex } = generateTestKeypair();
     const payload: MailPayload = { v: 1, secret: 'a'.repeat(64), body: 'test' };
-    return expect(encryptMail(payload, pubkeyHex).then(enc => decryptMail(enc, '0x' + privkeyHex))).resolves.toEqual(payload);
+    expect(decryptMail(encryptMail(payload, pubkeyHex), '0x' + privkeyHex)).toEqual(payload);
   });
 
   it('throws on non-33-byte recipient pubkey', () => {
-    return expect(encryptMail({ v: 1, secret: 'a'.repeat(64), body: '' }, 'deadbeef')).rejects.toThrow('33 bytes');
+    expect(() => encryptMail({ v: 1, secret: 'a'.repeat(64), body: '' }, 'deadbeef')).toThrow('33 bytes');
   });
 
   it('throws on non-32-byte private key', () => {
     const { pubkeyHex } = generateTestKeypair();
     const payload: MailPayload = { v: 1, secret: 'a'.repeat(64), body: '' };
-    return expect(encryptMail(payload, pubkeyHex).then(enc => decryptMail(enc, 'deadbeef'))).rejects.toThrow('32 bytes');
+    expect(() => decryptMail(encryptMail(payload, pubkeyHex), 'deadbeef')).toThrow('32 bytes');
   });
 });
 
