@@ -1,9 +1,8 @@
 import { secp256k1 } from '@noble/curves/secp256k1';
-import { cbc } from '@noble/ciphers/aes.js';
-import { hmac } from '@noble/hashes/hmac';
+import { gcm } from '@noble/ciphers/aes.js';
 import { sha256 } from '@noble/hashes/sha256';
-import { sha512 } from '@noble/hashes/sha512';
-import { concatBytes } from '@noble/hashes/utils';
+import { hkdf } from '@noble/hashes/hkdf';
+import { randomBytes } from '@noble/hashes/utils';
 import {
   openContractCall,
   request as stacksRequest,
@@ -619,16 +618,15 @@ function cvToWalletJson(cv: ClarityValue): unknown {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ECIES encryption
+// ECIES encryption — matches @mailslot/crypto scheme:
+//   ECDH(ephemeral, recipient) → HKDF-SHA256 → AES-256-GCM
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface EncryptedMail {
+  v: 1;
+  epk: string;
   iv: string;
-  ephemeralPK: string;
-  cipherText: string;
-  mac: string;
-  wasString: boolean;
-  cipherTextEncoding?: 'hex' | 'base64';
+  data: string;
 }
 
 interface DecryptedMailPayload {
@@ -638,47 +636,40 @@ interface DecryptedMailPayload {
   body: string;
 }
 
+const HKDF_SALT = new TextEncoder().encode('stackmail-v1');
+const HKDF_INFO = new TextEncoder().encode('encrypt');
+const AES_KEY_LEN = 32;
+const GCM_IV_LEN = 12;
+
+function eciesDeriveKey(sharedSecret: Uint8Array): Uint8Array {
+  return hkdf(sha256, sharedSecret, HKDF_SALT, HKDF_INFO, AES_KEY_LEN);
+}
+
 async function encryptMail(payload: unknown, recipientPubkeyHex: string): Promise<EncryptedMail> {
   const ephemeralPrivateKey = secp256k1.utils.randomPrivateKey();
   const ephemeralPublicKey = secp256k1.getPublicKey(ephemeralPrivateKey, true);
   const recipientPublicKey = hexToBytes(recipientPubkeyHex.replace(/^0x/i, ''));
   const sharedSecret = secp256k1.getSharedSecret(ephemeralPrivateKey, recipientPublicKey, true).slice(1);
-  const keyMaterial = sha512(sharedSecret);
-  const encryptionKey = keyMaterial.slice(0, 32);
-  const hmacKey = keyMaterial.slice(32);
-  const iv = secp256k1.utils.randomPrivateKey().slice(0, 16);
+  const key = eciesDeriveKey(sharedSecret);
+  const iv = randomBytes(GCM_IV_LEN);
   const plaintext = new TextEncoder().encode(JSON.stringify(payload));
-  const cipherText = cbc(encryptionKey, iv).encrypt(plaintext);
-  const mac = hmac(sha256, hmacKey, concatBytes(iv, ephemeralPublicKey, cipherText));
+  const ciphertext = gcm(key, iv).encrypt(plaintext); // ciphertext || authTag
   return {
+    v: 1,
+    epk: bytesToHex(ephemeralPublicKey),
     iv: bytesToHex(iv),
-    ephemeralPK: bytesToHex(ephemeralPublicKey),
-    cipherText: bytesToHex(cipherText),
-    mac: bytesToHex(mac),
-    wasString: true,
+    data: bytesToHex(ciphertext),
   };
 }
 
 async function decryptMail(payload: EncryptedMail, privateKeyHex: string): Promise<DecryptedMailPayload> {
   const privateKey = hexToBytes(privateKeyHex.replace(/^0x/i, ''));
-  const ephemeralPK = hexToBytes(payload.ephemeralPK.replace(/^0x/i, ''));
+  const epk = hexToBytes(payload.epk.replace(/^0x/i, ''));
   const iv = hexToBytes(payload.iv.replace(/^0x/i, ''));
-  const cipherText =
-    payload.cipherTextEncoding === 'base64'
-      ? Uint8Array.from(atob(payload.cipherText), c => c.charCodeAt(0))
-      : hexToBytes(payload.cipherText.replace(/^0x/i, ''));
-  const expectedMac = hexToBytes(payload.mac.replace(/^0x/i, ''));
-
-  const sharedSecret = secp256k1.getSharedSecret(privateKey, ephemeralPK, true).slice(1);
-  const keyMaterial = sha512(sharedSecret);
-  const encryptionKey = keyMaterial.slice(0, 32);
-  const hmacKey = keyMaterial.slice(32);
-  const actualMac = hmac(sha256, hmacKey, concatBytes(iv, ephemeralPK, cipherText));
-  if (actualMac.length !== expectedMac.length || actualMac.some((byte, i) => byte !== expectedMac[i])) {
-    throw new Error('decryption failed: wrong key or corrupted ciphertext');
-  }
-
-  const plaintext = cbc(encryptionKey, iv).decrypt(cipherText);
+  const combined = hexToBytes(payload.data.replace(/^0x/i, ''));
+  const sharedSecret = secp256k1.getSharedSecret(privateKey, epk, true).slice(1);
+  const key = eciesDeriveKey(sharedSecret);
+  const plaintext = gcm(key, iv).decrypt(combined); // verifies authTag internally
   const parsed = JSON.parse(new TextDecoder().decode(plaintext)) as DecryptedMailPayload;
   if (!parsed || parsed.v !== 1 || typeof parsed.secret !== 'string' || typeof parsed.body !== 'string') {
     throw new Error('Decrypted payload is not valid Mailslot mail');
@@ -2452,11 +2443,9 @@ async function sendMessage(): Promise<void> {
     const secretHex       = bytesToHex(secretBytes);
     const hashedSecretHex = bytesToHex(sha256(secretBytes));
 
-    // Encrypt payload
+    // Encrypt payload (always use browser-native ECIES to match server's expected format)
     const mailPayload = { v: 1 as const, secret: secretHex, subject: subject || undefined, body };
-    const encryptedPayload = walletCryptoAvailable
-      ? await encryptMailWithWallet(mailPayload, recipientInfo.recipientPublicKey)
-      : await encryptMail(mailPayload, recipientInfo.recipientPublicKey);
+    const encryptedPayload = await encryptMail(mailPayload, recipientInfo.recipientPublicKey);
 
     // Update pipe state
     const price            = BigInt(recipientInfo.amount || '1000');

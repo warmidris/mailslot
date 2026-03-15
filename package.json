@@ -12,6 +12,7 @@
     "lint": "npm run lint --workspaces"
   },
   "dependencies": {
+    "@stacks/wallet-sdk": "^7.2.0",
     "tsx": "^4.20.6"
   },
   "engines": {
