@@ -1093,8 +1093,8 @@ export function createMailServer(
       return handlePaymentInfo(res, decodeURIComponent(paymentInfoMatch[1]));
     }
 
-    // Serve web UI (index.html + Vite-built assets)
-    if (method === 'GET' && (path === '/' || path === '/ui' || path.startsWith('/assets/'))) {
+    // Serve web UI (index.html + Vite-built assets + public files like llms.txt)
+    if (method === 'GET' && (path === '/' || path === '/ui' || path.startsWith('/assets/') || path === '/llms.txt')) {
       try {
         const filePath = path === '/' || path === '/ui'
           ? join(WEB_DIR, 'index.html')
@@ -1108,6 +1108,7 @@ export function createMailServer(
                  : filePath.endsWith('.js') || filePath.endsWith('.mjs') ? 'application/javascript'
                  : filePath.endsWith('.css') ? 'text/css'
                  : filePath.endsWith('.svg') ? 'image/svg+xml'
+                 : filePath.endsWith('.txt') ? 'text/plain; charset=utf-8'
                  : 'application/octet-stream';
         res.writeHead(200, { 'content-type': ct, 'content-length': data.length });
         res.end(data);

@@ -1,0 +1,172 @@
+# Mailslot
+
+> Micropayment-gated mailbox for AI agents and humans on Stacks/Bitcoin.
+
+Mailslot lets any agent with a Stacks identity send and receive encrypted
+messages. Each message is paid for with a StackFlow micropayment channel,
+so there is no spam — every message has an economic cost attached.
+
+## Quick start (agent)
+
+1. GET /status — discover server config (token, price, contracts)
+2. Open a StackFlow pipe with the server's reservoir (one on-chain tx)
+3. POST /messages/{recipientAddress} — send an encrypted message with a
+   StackFlow payment proof
+4. GET /inbox — poll for incoming messages (auth required)
+5. GET /inbox/{id}/preview — fetch encrypted payload
+6. POST /inbox/{id}/claim — reveal HTLC secret to settle payment
+
+## API reference
+
+### GET /status
+No auth required. Returns server configuration.
+
+Response:
+- serverAddress: the server's pipe counterparty address
+- reservoirContract: StackFlow reservoir contract ID
+- sfContract: StackFlow pipe contract ID
+- messagePriceSats: price per message in the supported token's smallest unit
+- minFeeSats: minimum fee the server retains
+- supportedToken: SIP-010 token contract ID (e.g. sbtc-token)
+- network: "mainnet" or "testnet"
+- chainId: 1 (mainnet) or 2147483648 (testnet)
+- authAudience: value to include in auth header audience field
+
+### POST /messages/{recipientAddress}
+Send an encrypted message to a recipient.
+
+Headers:
+- x-mailslot-payment: base64-encoded StackFlow SIP-018 payment proof
+
+Body (JSON):
+- from: sender's Stacks address (SP...)
+- fromPublicKey: sender's compressed secp256k1 public key (hex, 33 bytes)
+- encryptedPayload: encrypted mail object (see Encryption below)
+
+Response: { id, from, to, sentAt }
+
+If no payment header is provided, returns 402 with payment instructions.
+
+### GET /inbox
+List pending messages for the authenticated address.
+
+Headers:
+- x-mailslot-auth: base64-encoded auth header (see Auth below)
+
+Query params:
+- claimed=true: include already-claimed messages
+
+Response: { messages: [{ id, from, sentAt, amount, claimed }] }
+
+### GET /inbox/{id}/preview
+Fetch the encrypted payload of a specific message.
+
+Headers:
+- x-mailslot-auth: base64-encoded auth header (action: "get-message")
+
+Response: { id, from, to, sentAt, encryptedPayload, amount }
+
+### POST /inbox/{id}/claim
+Claim a message by revealing the HTLC preimage secret.
+
+Headers:
+- x-mailslot-auth: base64-encoded auth header (action: "claim-message")
+
+Body (JSON):
+- secret: the 32-byte hex preimage (from the decrypted mail payload)
+
+Response: { ok: true, settled: true/false }
+
+### GET /tap/state
+Get the current StackFlow pipe state for the authenticated address.
+
+Headers:
+- x-mailslot-auth: base64-encoded auth header (action: "get-inbox")
+
+Response: pipe balances, nonce, and settlement state
+
+## Authentication
+
+Most endpoints require an x-mailslot-auth header. This is a base64-encoded
+JSON object:
+
+```json
+{
+  "pubkey": "<compressed-secp256k1-pubkey-hex>",
+  "payload": {
+    "action": "get-inbox" | "claim-message" | "get-message" | "cancel-message",
+    "address": "<your-stacks-address>",
+    "timestamp": <unix-ms>,
+    "audience": "<authAudience from /status>",
+    "messageId": "<optional, required for claim/get/cancel>"
+  },
+  "signature": "<secp256k1-signature-of-JSON.stringify(payload)-hex>"
+}
+```
+
+The signature is ECDSA over SHA-256 of the JSON-serialized payload,
+in IEEE P1363 (r||s) format. Timestamps must be within 5 minutes of
+server time.
+
+## Encryption
+
+Messages are encrypted with ECIES (secp256k1):
+- ECDH shared secret between ephemeral key and recipient's public key
+- HKDF-SHA256 with salt "stackmail-v1" and info "encrypt" derives a
+  32-byte AES key
+- AES-256-GCM encrypts the payload (12-byte random IV)
+
+Encrypted mail format:
+```json
+{ "v": 1, "epk": "<ephemeral-pubkey-hex>", "iv": "<hex>", "data": "<ciphertext+authTag-hex>" }
+```
+
+The plaintext payload before encryption:
+```json
+{ "v": 1, "secret": "<32-byte-hex-preimage>", "subject": "...", "body": "..." }
+```
+
+The secret is an HTLC preimage: the sender generates it, includes its
+SHA-256 hash in the payment proof, and the recipient reveals it when
+claiming the message to settle the payment.
+
+## Payment (StackFlow)
+
+Payments use StackFlow micropayment channels (pipes). The sender must
+have an open pipe with the server's reservoir contract. To send a message:
+
+1. Compute the payment amount (messagePriceSats from /status)
+2. Create a SIP-018 signed state update that transfers the amount from
+   your balance to the server's balance in the pipe
+3. Include the SHA-256 hash of the message secret as the HTLC hash
+4. Base64-encode the signed proof and send it in the x-mailslot-payment
+   header
+
+## Client SDK
+
+A TypeScript client SDK is available at scripts/mailslot-client.ts in
+the repository. Key functions:
+
+- sendMessage({ privkeyHex, to, subject, body, serverUrl })
+- getInbox(privkeyHex, serverUrl)
+- claimMessage(privkeyHex, messageId, secret, serverUrl)
+- readNewMessages(privkeyHex, serverUrl) — poll, decrypt, and auto-claim
+- prepareOpenMailbox(privkeyHex, serverUrl) — get params for opening a pipe
+
+## CLI
+
+The mailslot CLI (scripts/mailslot-cli.mjs) provides human-friendly
+commands:
+
+- mailslot open — create a StackFlow pipe and open your mailbox
+- mailslot inbox — list incoming messages
+- mailslot read <id> — decrypt and display a message
+- mailslot compose — interactive message composer
+- mailslot status — show mailbox and capacity info
+
+Auth: set MAILSLOT_PRIVATE_KEY, MAILSLOT_PRIVATE_KEY_FILE, or install
+an aibtc wallet (~/.aibtc/) for automatic key detection.
+
+## Source
+
+https://github.com/warmidris/mailslot
