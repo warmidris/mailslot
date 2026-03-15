@@ -265,7 +265,7 @@ export function createMailServer(
 
   function reservoirAdminAddress(): string | null {
     const [address] = (config.reservoirContractId ?? '').split('.');
-    return address && /^S[PT][0-9A-Z]{39}$/.test(address) ? address : null;
+    return address && /^S[PT][0-9A-Z]{38,40}$/.test(address) ? address : null;
   }
 
   async function requireAdminAuth(req: IncomingMessage, res: ServerResponse): Promise<string | null> {

@@ -311,4 +311,79 @@ describe('SqliteMessageStore', () => {
     });
   });
 
+  describe('getStats', () => {
+    it('returns all zeros on empty database', async () => {
+      const store = makeStore();
+      await store.init();
+      const stats = await store.getStats();
+      expect(stats).toEqual({
+        totalMailboxes: 0,
+        totalMessages: 0,
+        messagesClaimed: 0,
+        messagesUnclaimed: 0,
+        totalVolume: '0',
+        totalFees: '0',
+        uniqueSenders: 0,
+        uniqueRecipients: 0,
+      });
+    });
+
+    it('counts mailboxes from public_keys table', async () => {
+      const store = makeStore();
+      await store.init();
+      await store.savePublicKey('SP1ALICE', '02' + 'aa'.repeat(32));
+      await store.savePublicKey('SP1BOB', '02' + 'bb'.repeat(32));
+      const stats = await store.getStats();
+      expect(stats.totalMailboxes).toBe(2);
+    });
+
+    it('counts total, claimed, and unclaimed messages', async () => {
+      const store = makeStore();
+      await store.init();
+      const msg1 = makeMessage({ from: 'SP1SENDER', to: 'SP1ALICE' });
+      const msg2 = makeMessage({ from: 'SP1SENDER', to: 'SP1ALICE' });
+      const msg3 = makeMessage({ from: 'SP1SENDER', to: 'SP1BOB' });
+      await store.saveMessage(msg1);
+      await store.saveMessage(msg2);
+      await store.saveMessage(msg3);
+      await store.claimMessage(msg1.id, 'SP1ALICE');
+
+      const stats = await store.getStats();
+      expect(stats.totalMessages).toBe(3);
+      expect(stats.messagesClaimed).toBe(1);
+      expect(stats.messagesUnclaimed).toBe(2);
+    });
+
+    it('sums volume and fees as strings', async () => {
+      const store = makeStore();
+      await store.init();
+      await store.saveMessage(makeMessage({ amount: '5000', fee: '500' }));
+      await store.saveMessage(makeMessage({ amount: '3000', fee: '300' }));
+      const stats = await store.getStats();
+      expect(stats.totalVolume).toBe('8000');
+      expect(stats.totalFees).toBe('800');
+    });
+
+    it('counts unique senders and recipients', async () => {
+      const store = makeStore();
+      await store.init();
+      await store.saveMessage(makeMessage({ from: 'SP1SENDER1', to: 'SP1ALICE' }));
+      await store.saveMessage(makeMessage({ from: 'SP1SENDER1', to: 'SP1BOB' }));
+      await store.saveMessage(makeMessage({ from: 'SP1SENDER2', to: 'SP1ALICE' }));
+
+      const stats = await store.getStats();
+      expect(stats.uniqueSenders).toBe(2);
+      expect(stats.uniqueRecipients).toBe(2);
+    });
+
+    it('updating a public key does not double-count mailboxes', async () => {
+      const store = makeStore();
+      await store.init();
+      await store.savePublicKey('SP1ALICE', '02' + 'aa'.repeat(32));
+      await store.savePublicKey('SP1ALICE', '03' + 'bb'.repeat(32));
+      const stats = await store.getStats();
+      expect(stats.totalMailboxes).toBe(1);
+    });
+  });
+
 });

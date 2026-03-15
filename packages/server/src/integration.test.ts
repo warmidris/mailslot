@@ -6,14 +6,14 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { randomBytes, generateKeyPairSync, createSign, createECDH } from 'node:crypto';
+import { randomBytes, randomUUID, generateKeyPairSync, createSign, createECDH } from 'node:crypto';
 import { AddressInfo } from 'node:net';
 import { request as httpRequest } from 'node:http';
 import { createMailServer, type IPaymentService } from './app.js';
 import { SqliteMessageStore } from './store.js';
 import { pubkeyToStxAddress } from './auth.js';
 import { encryptMail, decryptMail, hashSecret } from '@mailslot/crypto';
-import type { Config } from './types.js';
+import type { Config, StoredMessage } from './types.js';
 import type { PendingPayment } from './types.js';
 import type { VerifiedPayment } from './payment.js';
 import type { Server } from 'node:http';
@@ -212,6 +212,25 @@ async function rawJsonRequest(url: string, init: {
   });
 }
 
+function makeMessage(overrides: Partial<StoredMessage> = {}): StoredMessage {
+  return {
+    id: randomUUID(),
+    from: 'SP1SENDER',
+    to: 'SP1RECIPIENT',
+    sentAt: Date.now(),
+    amount: '1000',
+    fee: '100',
+    paymentId: 'pay-' + randomUUID(),
+    hashedSecret: 'abc123hashedsecret',
+    encryptedPayload: { v: 1, epk: '02' + 'aa'.repeat(32), iv: 'bb'.repeat(12), data: 'cc'.repeat(48) },
+    pendingPayment: { stateProof: { nonce: 1, sig: 'abc' }, amount: '900', hashedSecret: 'abc123hashedsecret' },
+    deliveryState: 'ready',
+    claimed: false,
+    paymentSettled: false,
+    ...overrides,
+  };
+}
+
 // ─── Test setup ───────────────────────────────────────────────────────────────
 
 const senderSignKeypair = generateSecp256k1Keypair();
@@ -302,16 +321,20 @@ describe('GET /health', () => {
   });
 });
 
-describe('admin runtime settings', () => {
-  it.skip('allows the reservoir deployer to update runtime settings in the DB', async () => {
-    const adminKeypair = generateSecp256k1Keypair();
-    const adminAddress = pubkeyToStxAddress(adminKeypair.compressedPubkeyHex);
+describe('admin endpoints', () => {
+  // Each admin test spins up its own server with the admin keypair as reservoir deployer.
+  const adminKeypair = generateSecp256k1Keypair();
+  const adminAddress = pubkeyToStxAddress(adminKeypair.compressedPubkeyHex);
+
+  async function withAdminServer(
+    fn: (opts: { baseUrl: string; store: SqliteMessageStore }) => Promise<void>,
+  ): Promise<void> {
     const customConfig: Config = {
       ...serverConfig,
       reservoirContractId: `${adminAddress}.sm-reservoir`,
       sfContractId: `${adminAddress}.sm-stackflow`,
+      authAudience: `${adminAddress}.sm-reservoir`,
     };
-
     const customStore = new SqliteMessageStore(':memory:');
     await customStore.init();
     const customService = new MockPaymentService();
@@ -322,20 +345,32 @@ describe('admin runtime settings', () => {
     await new Promise<void>(resolve => customServer.listen(0, '127.0.0.1', () => resolve()));
     const addr = customServer.address() as AddressInfo;
     const customBaseUrl = `http://127.0.0.1:${addr.port}`;
-
     try {
-      const authHeader = buildAuthHeader({
-        pubkey: adminKeypair.compressedPubkeyHex,
-        action: 'admin-settings',
-        address: adminAddress,
-        privateKey: adminKeypair.privateKey,
-      });
+      await fn({ baseUrl: customBaseUrl, store: customStore });
+    } finally {
+      await new Promise<void>((resolve, reject) => customServer.close(err => err ? reject(err) : resolve()));
+    }
+  }
 
-      const updateRes = await fetch(`${customBaseUrl}/admin/settings`, {
+  function adminAuth() {
+    return buildAuthHeader({
+      pubkey: adminKeypair.compressedPubkeyHex,
+      action: 'admin-settings',
+      address: adminAddress,
+      audience: `${adminAddress}.sm-reservoir`,
+      privateKey: adminKeypair.privateKey,
+    });
+  }
+
+  // ─── POST /admin/settings ───────────────────────────────────────────────
+
+  it('allows the reservoir deployer to update runtime settings', async () => {
+    await withAdminServer(async ({ baseUrl }) => {
+      const res = await rawJsonRequest(`${baseUrl}/admin/settings`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-mailslot-auth': authHeader,
+          'x-mailslot-auth': adminAuth(),
         },
         body: JSON.stringify({
           messagePriceSats: '2500',
@@ -343,21 +378,165 @@ describe('admin runtime settings', () => {
           maxPendingPerSender: 7,
         }),
       });
-      expect(updateRes.status).toBe(200);
-      const updateBody = await updateRes.json() as { settings: RuntimeSettingsStore extends never ? never : Record<string, unknown> };
-      expect(updateBody.settings.messagePriceSats).toBe('2500');
-      expect(updateBody.settings.minFeeSats).toBe('250');
-      expect(updateBody.settings.maxPendingPerSender).toBe(7);
+      expect(res.status).toBe(200);
+      const body = res.body as { ok: boolean; settings: Record<string, unknown> };
+      expect(body.ok).toBe(true);
+      expect(body.settings.messagePriceSats).toBe('2500');
+      expect(body.settings.minFeeSats).toBe('250');
+      expect(body.settings.maxPendingPerSender).toBe(7);
+    });
+  });
 
-      const statusRes = await fetch(`${customBaseUrl}/status`);
+  it('updated settings are reflected in /status', async () => {
+    await withAdminServer(async ({ baseUrl }) => {
+      await rawJsonRequest(`${baseUrl}/admin/settings`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-mailslot-auth': adminAuth(),
+        },
+        body: JSON.stringify({ messagePriceSats: '9999' }),
+      });
+
+      const statusRes = await rawJsonRequest(`${baseUrl}/status`, { method: 'GET' });
       expect(statusRes.status).toBe(200);
-      const statusBody = await statusRes.json() as { messagePriceSats: string; minFeeSats: string; runtimeSettings: Record<string, unknown> };
-      expect(statusBody.messagePriceSats).toBe('2500');
-      expect(statusBody.minFeeSats).toBe('250');
-      expect(statusBody.runtimeSettings.maxPendingPerSender).toBe(7);
-    } finally {
-      await new Promise<void>((resolve, reject) => customServer.close(err => err ? reject(err) : resolve()));
-    }
+      const statusBody = statusRes.body as { messagePriceSats: string };
+      expect(statusBody.messagePriceSats).toBe('9999');
+    });
+  });
+
+  // ─── GET /admin/settings ────────────────────────────────────────────────
+
+  it('GET /admin/settings returns current settings', async () => {
+    await withAdminServer(async ({ baseUrl }) => {
+      const res = await rawJsonRequest(`${baseUrl}/admin/settings`, {
+        method: 'GET',
+        headers: { 'x-mailslot-auth': adminAuth() },
+      });
+      expect(res.status).toBe(200);
+      const body = res.body as { ok: boolean; admin: string; settings: Record<string, unknown> };
+      expect(body.ok).toBe(true);
+      expect(body.admin).toBe(adminAddress);
+      expect(body.settings).toHaveProperty('messagePriceSats');
+      expect(body.settings).toHaveProperty('minFeeSats');
+    });
+  });
+
+  // ─── GET /admin/stats ───────────────────────────────────────────────────
+
+  it('GET /admin/stats returns zeros on empty server', async () => {
+    await withAdminServer(async ({ baseUrl }) => {
+      const res = await rawJsonRequest(`${baseUrl}/admin/stats`, {
+        method: 'GET',
+        headers: { 'x-mailslot-auth': adminAuth() },
+      });
+      expect(res.status).toBe(200);
+      const body = res.body as { ok: boolean; stats: Record<string, unknown> };
+      expect(body.ok).toBe(true);
+      expect(body.stats.totalMailboxes).toBe(0);
+      expect(body.stats.totalMessages).toBe(0);
+      expect(body.stats.messagesClaimed).toBe(0);
+      expect(body.stats.messagesUnclaimed).toBe(0);
+      expect(body.stats.totalVolume).toBe('0');
+      expect(body.stats.totalFees).toBe('0');
+      expect(body.stats.uniqueSenders).toBe(0);
+      expect(body.stats.uniqueRecipients).toBe(0);
+    });
+  });
+
+  it('GET /admin/stats reflects saved mailboxes and messages', async () => {
+    await withAdminServer(async ({ baseUrl, store: adminStore }) => {
+      // Seed some data
+      await adminStore.savePublicKey('SP1ALICE', '02' + 'aa'.repeat(32));
+      await adminStore.savePublicKey('SP1BOB', '02' + 'bb'.repeat(32));
+      await adminStore.saveMessage(makeMessage({ from: 'SP1SENDER1', to: 'SP1ALICE', amount: '5000', fee: '500' }));
+      await adminStore.saveMessage(makeMessage({ from: 'SP1SENDER2', to: 'SP1BOB', amount: '3000', fee: '300' }));
+      const claimable = makeMessage({ from: 'SP1SENDER1', to: 'SP1BOB', amount: '2000', fee: '200' });
+      await adminStore.saveMessage(claimable);
+      await adminStore.claimMessage(claimable.id, 'SP1BOB');
+
+      const res = await rawJsonRequest(`${baseUrl}/admin/stats`, {
+        method: 'GET',
+        headers: { 'x-mailslot-auth': adminAuth() },
+      });
+      expect(res.status).toBe(200);
+      const body = res.body as { ok: boolean; stats: Record<string, unknown> };
+      expect(body.stats.totalMailboxes).toBe(2);
+      expect(body.stats.totalMessages).toBe(3);
+      expect(body.stats.messagesClaimed).toBe(1);
+      expect(body.stats.messagesUnclaimed).toBe(2);
+      expect(body.stats.totalVolume).toBe('10000');
+      expect(body.stats.totalFees).toBe('1000');
+      expect(body.stats.uniqueSenders).toBe(2);
+      expect(body.stats.uniqueRecipients).toBe(2);
+    });
+  });
+
+  // ─── Auth failure cases ─────────────────────────────────────────────────
+
+  it('rejects admin requests without auth header', async () => {
+    await withAdminServer(async ({ baseUrl }) => {
+      for (const endpoint of ['/admin/settings', '/admin/stats']) {
+        const res = await rawJsonRequest(`${baseUrl}${endpoint}`, { method: 'GET' });
+        expect(res.status).toBe(401);
+        expect((res.body as { error: string }).error).toBe('auth-required');
+      }
+    });
+  });
+
+  it('rejects admin requests from non-admin address', async () => {
+    await withAdminServer(async ({ baseUrl }) => {
+      const nonAdminKeypair = generateSecp256k1Keypair();
+      const nonAdminAddress = pubkeyToStxAddress(nonAdminKeypair.compressedPubkeyHex);
+      const auth = buildAuthHeader({
+        pubkey: nonAdminKeypair.compressedPubkeyHex,
+        action: 'admin-settings',
+        address: nonAdminAddress,
+        audience: `${adminAddress}.sm-reservoir`,
+        privateKey: nonAdminKeypair.privateKey,
+      });
+
+      const res = await rawJsonRequest(`${baseUrl}/admin/settings`, {
+        method: 'GET',
+        headers: { 'x-mailslot-auth': auth },
+      });
+      expect(res.status).toBe(403);
+      expect((res.body as { error: string }).error).toBe('admin-required');
+    });
+  });
+
+  it('rejects admin requests with wrong action', async () => {
+    await withAdminServer(async ({ baseUrl }) => {
+      const wrongActionAuth = buildAuthHeader({
+        pubkey: adminKeypair.compressedPubkeyHex,
+        action: 'get-inbox',
+        address: adminAddress,
+        audience: `${adminAddress}.sm-reservoir`,
+        privateKey: adminKeypair.privateKey,
+      });
+
+      const res = await rawJsonRequest(`${baseUrl}/admin/settings`, {
+        method: 'GET',
+        headers: { 'x-mailslot-auth': wrongActionAuth },
+      });
+      expect(res.status).toBe(403);
+      expect((res.body as { error: string }).error).toBe('auth-action-mismatch');
+    });
+  });
+
+  it('POST /admin/settings rejects invalid JSON body', async () => {
+    await withAdminServer(async ({ baseUrl }) => {
+      const res = await rawJsonRequest(`${baseUrl}/admin/settings`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-mailslot-auth': adminAuth(),
+        },
+        body: 'not-json{{{',
+      });
+      expect(res.status).toBe(400);
+      expect((res.body as { error: string }).error).toBe('invalid-json');
+    });
   });
 });
 

@@ -305,7 +305,7 @@ function getRuntimeReservoirContract(): string {
 
 function getReservoirDeployerAddress(): string | null {
   const [deployer] = getRuntimeReservoirContract().split('.');
-  return /^S[PT][0-9A-Z]{39}$/.test(deployer) ? deployer : null;
+  return /^S[PT][0-9A-Z]{38,40}$/.test(deployer) ? deployer : null;
 }
 
 function connectedUserIsReservoirAdmin(): boolean {
