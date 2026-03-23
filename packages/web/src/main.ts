@@ -514,6 +514,20 @@ async function ensureSupportedTokenAssetNameLoaded(): Promise<void> {
 
 const bnsForwardCache = new Map<string, string>();
 const bnsReverseCache = new Map<string, string>();
+const bnsReverseMisses = new Set<string>();
+const bnsReverseInFlight = new Map<string, Promise<string | null>>();
+
+function getBnsApiBase(): string {
+  const chainId = (serverStatus.chainId as number | undefined) ?? CHAIN_ID;
+  return chainIdToHiroApi(chainId);
+}
+
+function renderInboxSender(address: string | null | undefined): string {
+  const rawAddress = address || '—';
+  const bnsName = address ? bnsReverseCache.get(address) : null;
+  if (!bnsName) return `From: ${escHtml(rawAddress)}`;
+  return `From: ${escHtml(bnsName)} <span style="color:var(--muted);font-size:12px">(${escHtml(shortPrincipal(rawAddress))})</span>`;
+}
 
 /**
  * Resolve a BNS name (e.g. "brice.btc") to its owner's STX address.
@@ -541,16 +555,46 @@ async function resolveBnsName(name: string): Promise<string | null> {
  */
 async function reverseLookupBns(address: string): Promise<string | null> {
   if (bnsReverseCache.has(address)) return bnsReverseCache.get(address)!;
+  if (bnsReverseMisses.has(address)) return null;
+  const existing = bnsReverseInFlight.get(address);
+  if (existing) return existing;
+
+  const lookup = (async (): Promise<string | null> => {
   try {
-    const res = await fetch(`https://api.hiro.so/v1/addresses/stacks/${encodeURIComponent(address)}`);
+      const res = await fetch(`${getBnsApiBase()}/v1/addresses/stacks/${encodeURIComponent(address)}`);
     if (!res.ok) return null;
     const json = await res.json();
     const name: string | undefined = json.names?.[0];
-    if (name) bnsReverseCache.set(address, name);
+      if (name) {
+        bnsReverseCache.set(address, name);
+      } else {
+        bnsReverseMisses.add(address);
+      }
     return name ?? null;
   } catch {
     return null;
-  }
+    } finally {
+      bnsReverseInFlight.delete(address);
+    }
+  })();
+
+  bnsReverseInFlight.set(address, lookup);
+  return lookup;
+}
+
+function refreshInboxSenderLabels(): void {
+  document.querySelectorAll<HTMLElement>('.msg-from[data-address]').forEach(el => {
+    const addr = el.dataset.address;
+    if (!addr) return;
+    el.innerHTML = renderInboxSender(addr);
+  });
+}
+
+async function prefetchInboxSenderNames(messages: InboxMessage[]): Promise<void> {
+  const unresolvedAddrs = [...new Set(messages.map(m => m.from).filter(a => a && !bnsReverseCache.has(a) && !bnsReverseMisses.has(a)))];
+  if (!unresolvedAddrs.length) return;
+  await Promise.allSettled(unresolvedAddrs.map(addr => reverseLookupBns(addr)));
+  refreshInboxSenderLabels();
 }
 
 /** Returns true if the input looks like a BNS name (contains a dot). */
@@ -2646,7 +2690,7 @@ function renderInboxMessages(messages: InboxMessage[]): void {
     el.innerHTML = `
       <div class="msg-header">
         <div>
-          <div class="msg-from" data-address="${escHtml(msg.from || '')}">From: ${escHtml(bnsReverseCache.get(msg.from) ?? (msg.from || '—'))}</div>
+          <div class="msg-from" data-address="${escHtml(msg.from || '')}">${renderInboxSender(msg.from)}</div>
           <div style="margin-top:4px;font-size:12px;color:var(--muted)">${time}</div>
         </div>
         <div class="msg-meta">
@@ -2674,18 +2718,7 @@ function renderInboxMessages(messages: InboxMessage[]): void {
     listEl.appendChild(el);
   }
 
-  // Resolve BNS names in the background and update displayed sender labels
-  const unresolvedAddrs = [...new Set(messages.map(m => m.from).filter(a => a && !bnsReverseCache.has(a)))];
-  if (unresolvedAddrs.length) {
-    Promise.allSettled(unresolvedAddrs.map(addr => reverseLookupBns(addr))).then(() => {
-      document.querySelectorAll<HTMLElement>('.msg-from[data-address]').forEach(el => {
-        const addr = el.dataset.address;
-        if (addr && bnsReverseCache.has(addr)) {
-          el.textContent = `From: ${bnsReverseCache.get(addr)!}`;
-        }
-      });
-    });
-  }
+  void prefetchInboxSenderNames(messages);
 }
 
 async function fetchPreviewMessage(messageId: string): Promise<PreviewMessageResponse> {

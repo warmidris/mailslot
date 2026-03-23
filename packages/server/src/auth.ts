@@ -152,20 +152,6 @@ function verifySecp256k1Signature(
       pubkeyBytes,
     ]);
 
-    // Convert compact (r||s) to DER for Node.js verify
-    const r = sigBytes.subarray(0, 32);
-    const s = sigBytes.subarray(32);
-
-    // DER-encode each component (add 0x00 prefix if high bit set)
-    const derInt = (buf: Buffer): Buffer => {
-      const padded = buf[0] & 0x80 ? Buffer.concat([Buffer.from([0x00]), buf]) : buf;
-      return Buffer.concat([Buffer.from([0x02, padded.length]), padded]);
-    };
-    const rDer = derInt(r);
-    const sDer = derInt(s);
-    const seqContent = Buffer.concat([rDer, sDer]);
-    const der = Buffer.concat([Buffer.from([0x30, seqContent.length]), seqContent]);
-
     const verifier = createVerify('SHA256');
     verifier.update(Buffer.from(messageJson, 'utf-8'));
     return verifier.verify({ key: spki, format: 'der', type: 'spki', dsaEncoding: 'ieee-p1363' }, sigBytes);
