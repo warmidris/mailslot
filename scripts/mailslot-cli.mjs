@@ -352,10 +352,10 @@ async function resolveBnsName(name) {
 async function reverseLookupBns(address) {
   if (bnsReverseCache.has(address)) return bnsReverseCache.get(address);
   try {
-    const res = await fetch(`https://api.hiro.so/v1/addresses/stacks/${encodeURIComponent(address)}`);
+    const res = await fetch(`https://api.bnsv2.com/names/address/${encodeURIComponent(address)}/valid`);
     if (!res.ok) return null;
     const json = await res.json();
-    const name = json.names?.[0] ?? null;
+    const name = json.names?.[0]?.full_name ?? null;
     if (name) bnsReverseCache.set(address, name);
     return name;
   } catch {

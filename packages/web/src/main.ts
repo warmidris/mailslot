@@ -517,9 +517,9 @@ const bnsReverseCache = new Map<string, string>();
 const bnsReverseMisses = new Set<string>();
 const bnsReverseInFlight = new Map<string, Promise<string | null>>();
 
-function getBnsApiBase(): string {
+function getBnsv2ApiBase(): string {
   const chainId = (serverStatus.chainId as number | undefined) ?? CHAIN_ID;
-  return chainIdToHiroApi(chainId);
+  return chainId === 1 ? 'https://api.bnsv2.com' : 'https://api.bnsv2.com/testnet';
 }
 
 function renderInboxSender(address: string | null | undefined): string {
@@ -561,10 +561,10 @@ async function reverseLookupBns(address: string): Promise<string | null> {
 
   const lookup = (async (): Promise<string | null> => {
   try {
-      const res = await fetch(`${getBnsApiBase()}/v1/addresses/stacks/${encodeURIComponent(address)}`);
+      const res = await fetch(`${getBnsv2ApiBase()}/names/address/${encodeURIComponent(address)}/valid`);
     if (!res.ok) return null;
     const json = await res.json();
-    const name: string | undefined = json.names?.[0];
+    const name: string | undefined = json.names?.[0]?.full_name;
       if (name) {
         bnsReverseCache.set(address, name);
       } else {
