@@ -2769,8 +2769,7 @@ async function claimAndOpenMessage(messageId: string): Promise<void> {
     lastInboxMessages = updateInboxMessage(lastInboxMessages, messageId, { claimed: true });
     await refreshCurrentTapState();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    inboxMessageErrors[messageId] = message;
+    inboxMessageErrors[messageId] = extractErrorMessage(err) || String(err);
   } finally {
     inboxActionMessageId = null;
     renderInboxMessages(lastInboxMessages);
@@ -2786,8 +2785,7 @@ async function openClaimedMessage(messageId: string): Promise<void> {
     const claimed = await fetchClaimedMessage(messageId);
     openedInboxMessages[messageId] = await decryptInboxPayload(claimed.message.encryptedPayload);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    inboxMessageErrors[messageId] = message;
+    inboxMessageErrors[messageId] = extractErrorMessage(err) || String(err);
   } finally {
     inboxActionMessageId = null;
     renderInboxMessages(lastInboxMessages);
