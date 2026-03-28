@@ -262,8 +262,8 @@ function extractDecryptedMessage(resp: unknown): string | null {
 
 function extractDecryptedMailslotMessage(resp: unknown): Partial<DecryptedMailPayload> | null {
   return (
-    (resp as { result?: { mailslotMessage?: Partial<DecryptedMailPayload> } })?.result?.mailslotMessage
-    ?? (resp as { mailslotMessage?: Partial<DecryptedMailPayload> })?.mailslotMessage
+    (resp as { result?: { structuredMessage?: Partial<DecryptedMailPayload> } })?.result?.structuredMessage
+    ?? (resp as { structuredMessage?: Partial<DecryptedMailPayload> })?.structuredMessage
     ?? null
   );
 }
