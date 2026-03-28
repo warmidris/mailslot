@@ -219,14 +219,21 @@ function extractErrorMessage(error: unknown): string {
   if (typeof error === 'string') return error;
   if (error instanceof Error) return error.message;
   if (typeof error === 'object' && error != null) {
-    const candidate = (error as { message?: unknown; reason?: unknown; shortMessage?: unknown; code?: unknown });
+    const obj = error as Record<string, unknown>;
+    // Handle JSON-RPC error responses: { error: { code, message } }
+    if (typeof obj.error === 'object' && obj.error != null) {
+      const rpcErr = obj.error as Record<string, unknown>;
+      if (typeof rpcErr.message === 'string') return rpcErr.message;
+    }
     const parts = [
-      typeof candidate.message === 'string' ? candidate.message : '',
-      typeof candidate.reason === 'string' ? candidate.reason : '',
-      typeof candidate.shortMessage === 'string' ? candidate.shortMessage : '',
-      typeof candidate.code === 'string' || typeof candidate.code === 'number' ? String(candidate.code) : '',
+      typeof obj.message === 'string' ? obj.message : '',
+      typeof obj.reason === 'string' ? obj.reason : '',
+      typeof obj.shortMessage === 'string' ? obj.shortMessage : '',
+      typeof obj.code === 'string' || typeof obj.code === 'number' ? String(obj.code) : '',
     ].filter(Boolean);
     if (parts.length) return parts.join(' ');
+    // Last resort: serialize the object so we see what it actually is
+    try { return JSON.stringify(error); } catch { /* fall through */ }
   }
   return String(error ?? '');
 }
