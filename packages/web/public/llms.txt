@@ -112,7 +112,7 @@ server time.
 
 Messages are encrypted with ECIES (secp256k1):
 - ECDH shared secret between ephemeral key and recipient's public key
-- HKDF-SHA256 with salt "stackmail-v1" and info "encrypt" derives a
+- HKDF-SHA256 with salt "stx-ecies-v1" and info "encrypt" derives a
   32-byte AES key
 - AES-256-GCM encrypts the payload (12-byte random IV)
 

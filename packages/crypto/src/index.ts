@@ -7,7 +7,7 @@
  * Scheme:
  *   1. Generate ephemeral secp256k1 keypair (esk, epk)
  *   2. shared = ECDH(esk, recipient_pubkey)
- *   3. key = HKDF-SHA256(shared, salt="stackmail-v1", info="encrypt", len=32)
+ *   3. key = HKDF-SHA256(shared, salt="stx-ecies-v1", info="encrypt", len=32)
  *   4. ciphertext = AES-256-GCM(key, iv=random_12, plaintext=JSON(MailPayload))
  *   5. output = { v, epk, iv, data: ciphertext || auth_tag }
  */
@@ -48,7 +48,7 @@ export interface EncryptedMail {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-const HKDF_SALT = Buffer.from('stackmail-v1', 'utf-8');
+const HKDF_SALT = Buffer.from('stx-ecies-v1', 'utf-8');
 const HKDF_INFO = Buffer.from('encrypt', 'utf-8');
 const AES_KEY_LEN = 32;
 const IV_LEN = 12;

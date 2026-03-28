@@ -505,7 +505,7 @@ async function sip018Sign(
 
 // ─── ECIES Encryption ─────────────────────────────────────────────────────────
 
-const HKDF_SALT = Buffer.from('stackmail-v1', 'utf-8');
+const HKDF_SALT = Buffer.from('stx-ecies-v1', 'utf-8');
 const HKDF_INFO = Buffer.from('encrypt', 'utf-8');
 const AES_KEY_LEN = 32;
 const IV_LEN = 12;

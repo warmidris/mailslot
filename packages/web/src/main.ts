@@ -721,7 +721,7 @@ interface DecryptedMailPayload {
   body: string;
 }
 
-const HKDF_SALT = new TextEncoder().encode('stackmail-v1');
+const HKDF_SALT = new TextEncoder().encode('stx-ecies-v1');
 const HKDF_INFO = new TextEncoder().encode('encrypt');
 const AES_KEY_LEN = 32;
 const GCM_IV_LEN = 12;
